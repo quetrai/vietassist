@@ -1,0 +1,26 @@
+# Git
+.git
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+env
+
+# Node.js
+node_modules
+**/node_modules
+
+# Zalo gateway build output
+zalo-gateway/dist
+
+# Logs and local files
+*.log
+.DS_Store
