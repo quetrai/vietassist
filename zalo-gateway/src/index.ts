@@ -93,28 +93,54 @@ async function bridge(payload: Record<string, unknown>): Promise<string[]> {
 }
 
 async function fetchSavedSession(): Promise<Credentials | null> {
-  const response = await fetch(sessionUrl, {
-    headers: {"x-bridge-secret": bridgeSecret},
-    signal: AbortSignal.timeout(20000),
-  });
-  if (!response.ok) return null;
-  const data = (await response.json()) as {
-    cookie_json?: string;
-    imei?: string;
-    user_agent?: string;
-  };
-  if (!data.cookie_json || !data.imei) return null;
-  let cookie: unknown;
-  try {
-    cookie = JSON.parse(data.cookie_json);
-  } catch {
-    throw new Error("Zalo session cookie is invalid JSON");
+  const maxAttempts = 15;
+  const retryDelayMs = 2000;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(sessionUrl, {
+        headers: {"x-bridge-secret": bridgeSecret},
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as {
+          cookie_json?: string;
+          imei?: string;
+          user_agent?: string;
+        };
+        if (!data.cookie_json || !data.imei) return null;
+
+        let cookie: unknown;
+        try {
+          cookie = JSON.parse(data.cookie_json);
+        } catch {
+          throw new Error("Zalo session cookie is invalid JSON");
+        }
+
+        return {
+          cookie,
+          imei: data.imei,
+          userAgent: data.user_agent || defaultUserAgent,
+        };
+      }
+
+      if (![502, 503, 504].includes(response.status)) return null;
+      lastError = new Error(`Backend HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < maxAttempts) {
+      console.warn(
+        `[zalo] backend chưa sẵn sàng, retry ${attempt}/${maxAttempts - 1} sau ${retryDelayMs}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
   }
-  return {
-    cookie,
-    imei: data.imei,
-    userAgent: data.user_agent || defaultUserAgent,
-  };
+
+  throw lastError instanceof Error ? lastError : new Error("Backend unavailable");
 }
 
 interface IncomingMessage {
