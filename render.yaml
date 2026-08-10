@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: vietassist
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /ready
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_OWNER_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SETTINGS_ENC_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: WEBHOOK_BASE_URL
+        sync: false
+      - key: BRIDGE_SECRET
+        sync: false
+      - key: ZALO_ENABLED
+        value: "false"
