@@ -1,0 +1,1 @@
+{"name":"vietassist-zalo-gateway","version":"1.0.0","private":true,"type":"module","engines":{"node":">=18"},"scripts":{"build":"tsc -p tsconfig.json","check":"tsc -p tsconfig.json --noEmit","start":"node dist/index.js","test":"npm run build && node --test tests/format.test.mjs"},"dependencies":{"zca-js":"2.1.2"},"devDependencies":{"@types/node":"^22.10.1","typescript":"^5.7.2"}}
