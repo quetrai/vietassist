@@ -173,17 +173,26 @@ def _percentile_rank(current: float, history: list[float]) -> float:
     return feat._percentile_rank(current, history)
 
 
-def _fetch_valuation_sync(symbol: str) -> Valuation | None:
+def _get_stock(symbol: str):
     try:
         from vnstock import Vnstock
     except ImportError:
         logger.warning("Chưa cài thư viện vnstock (pip install vnstock).")
         return None
 
-    try:
-        stock = Vnstock().stock(symbol=symbol, source="VCI")
-    except Exception:
-        logger.warning("vnstock: không khởi tạo được cho %s", symbol, exc_info=True)
+    for source in ("VCI", "KBS"):
+        try:
+            stock = Vnstock().stock(symbol=symbol, source=source)
+            return stock
+        except Exception:
+            logger.info("vnstock: source %s không khả dụng cho %s", source, symbol)
+    return None
+
+
+def _fetch_valuation_sync(symbol: str) -> Valuation | None:
+    stock = _get_stock(symbol)
+    if stock is None:
+        logger.warning("vnstock: không khởi tạo được cho %s", symbol)
         return None
 
     df = None
@@ -265,8 +274,10 @@ def _fetch_growth_sync(symbol: str) -> GrowthTrend | None:
     except ImportError:
         return None
 
+    stock = _get_stock(symbol)
+    if stock is None:
+        return None
     try:
-        stock = Vnstock().stock(symbol=symbol, source="VCI")
         df = stock.finance.income_statement(period="quarter")
     except Exception:
         logger.warning("vnstock: income_statement lỗi cho %s", symbol, exc_info=True)
@@ -315,8 +326,10 @@ def _fetch_foreign_sync(symbol: str) -> ForeignFlowReal | None:
     except ImportError:
         return None
 
+    stock = _get_stock(symbol)
+    if stock is None:
+        return None
     try:
-        stock = Vnstock().stock(symbol=symbol, source="VCI")
         board = stock.trading.price_board(symbols_list=[symbol])
     except Exception:
         logger.warning("vnstock: price_board lỗi cho %s", symbol, exc_info=True)
@@ -373,9 +386,8 @@ def _fetch_foreign_history_sync(symbol: str, days: int = 10) -> ForeignFlowTrend
     except ImportError:
         return None
 
-    try:
-        stock = Vnstock().stock(symbol=symbol, source="VCI")
-    except Exception:
+    stock = _get_stock(symbol)
+    if stock is None:
         return None
 
     df = None
