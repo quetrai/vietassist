@@ -207,3 +207,48 @@ def test_trim_open_session_keeps_bar_after_market_close(monkeypatch):
     trimmed = market.trim_open_session(series)
 
     assert len(trimmed.closes) == 6
+
+
+async def test_fetch_realtime_tick_uses_today_match_price(monkeypatch):
+    class _TickResponse:
+        status_code = 200
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return {"data": {"GetKrxTicksBySymbols": {"ticks": [{"matchPrice": 27.45}]}}}
+
+    class _TickClient:
+        async def post(self, *_args, **_kwargs):
+            return _TickResponse()
+
+    market._realtime_cache.clear()
+    monkeypatch.setattr(market, "client", lambda: _TickClient())
+    price = await market.fetch_realtime_tick("HPG", ttl=0)
+    assert price == 27450
+
+
+async def test_fetch_quote_refuses_stale_close_during_market_hours(monkeypatch):
+    today = datetime.now(market.VN_TZ)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return today.replace(hour=10, minute=0, second=0, microsecond=0)
+
+    monkeypatch.setattr(market, "datetime", _FixedDateTime)
+    monkeypatch.setattr(
+        market,
+        "fetch",
+        lambda *args, **kwargs: _fake_series_for_quote(today.date().isoformat()),
+    )
+    monkeypatch.setattr(market, "fetch_realtime_tick", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="không dùng giá đóng cửa cũ"):
+        await market.fetch_quote("HPG")
+
+
+def _fake_series_for_quote(today: str) -> market.Series:
+    previous = "2026-08-10"
+    return market.Series(
+        "HPG", [27000, 27100], [27200, 27300], [26900, 27000], [1000, 1200], [previous, today]
+    )

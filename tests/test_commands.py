@@ -194,3 +194,9 @@ async def test_vimo_reports_friendly_message_on_generic_provider_error(monkeypat
     monkeypatch.setattr(commands.router, "macro_news", fake_macro_news)
     result = await commands.handle(_USER, "/vimo lãi suất")
     assert "lỗi tạm thời" in result
+
+
+async def test_help_command_exists():
+    result = await commands.handle(_USER, "/help")
+    assert "VietAssist" in result
+    assert "/quote" in result
