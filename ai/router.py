@@ -93,9 +93,13 @@ class AIRouter:
         if not query.strip():
             raise ValueError("Thiếu sản phẩm cần tìm")
         prompt = (
-            "Dùng Google Search tìm giá bán hiện tại tại Việt Nam cho sản phẩm sau. "
-            "Chỉ nêu giá có trong kết quả tìm kiếm, kèm cửa hàng, thời điểm và nguồn. "
-            "Nếu không xác minh được, nói rõ chưa tra được; tuyệt đối không ước lượng.\n\n" + query
+            "Dùng Google Search để tìm giá bán hiện tại tại Việt Nam cho sản phẩm sau. "
+            "Ưu tiên trang chính hãng và nhà bán lẻ lớn tại Việt Nam. "
+            "Trả lời bằng tiếng Việt. Nêu tên phiên bản/dung lượng/màu nếu có, giá niêm yết hoặc "
+            "giá đang bán, cửa hàng, thời điểm kiểm tra và URL nguồn. Nếu có nhiều mức giá, "
+            "liệt kê các mức đáng tin cậy và nói rõ điều kiện khuyến mãi. Không được tự đoán giá. "
+            "Nếu Google Search không xác minh được giá hiện tại, nói rõ chưa xác minh được.\n\n"
+            + query
         )
         return await self.google.grounded_search(prompt)
 
@@ -103,9 +107,12 @@ class AIRouter:
         if not query.strip():
             raise ValueError("Thiếu câu hỏi cần tra")
         prompt = (
-            "Dùng Google Search tra tin tức/vĩ mô mới nhất liên quan câu hỏi sau, trong bối cảnh "
-            "thị trường chứng khoán Việt Nam. Chỉ nêu thông tin có trong kết quả tìm kiếm, kèm "
-            "thời điểm và nguồn. Nếu không xác minh được, nói rõ chưa tra được.\n\n" + query
+            "Dùng Google Search tra tin tức mới nhất trong ngày hiện tại liên quan câu hỏi sau. "
+            "Nếu câu hỏi không nêu chủ đề cụ thể, hãy hiểu là yêu cầu tóm tắt các tin đáng chú ý "
+            "hôm nay, ưu tiên Việt Nam, kinh tế, chứng khoán và công nghệ. "
+            "Trả lời bằng tiếng Việt. Mỗi tin phải có tiêu đề ngắn, thời điểm/ngày, tóm tắt và "
+            "nguồn/URL. Không bịa tin, không dùng kiến thức cũ thay cho tin hiện tại. "
+            "Nếu không xác minh được, nói rõ chưa xác minh được.\n\n" + query
         )
         return await self.google.grounded_search(prompt)
 
