@@ -4,7 +4,7 @@ services:
     runtime: docker
     plan: free
     region: singapore
-    healthCheckPath: /ready
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false

@@ -121,12 +121,14 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="VietAssist", lifespan=lifespan)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health() -> dict[str, str]:
+    """Lightweight liveness endpoint for Render/UptimeRobot."""
     return {"status": "ok"}
 
 
-@app.get("/ready")
+@app.api_route("/ready", methods=["GET", "HEAD"])
 async def readiness() -> dict[str, str]:
     if telegram is None:
         raise HTTPException(503, "Telegram chưa sẵn sàng")
