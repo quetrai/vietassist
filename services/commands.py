@@ -40,7 +40,7 @@ async def _cmd_gia(user: User, argument: str) -> str:
     except GroundingUnavailable:
         return "Chưa cấu hình dịch vụ tìm kiếm thời gian thực."
     except ProviderError:
-        return "Không tra được giá lúc này. Kiểm tra GROQ_API_KEY và thử lại."
+        return "Không tìm thấy dữ liệu giá thời gian thực đã được xác minh lúc này. Không dùng dữ liệu đoán."
 
 
 async def _cmd_prompt(user: User, argument: str) -> str:
@@ -80,7 +80,7 @@ async def _cmd_vimo(user: User, argument: str) -> str:
     except GroundingUnavailable:
         return "Chưa cấu hình dịch vụ tìm kiếm thời gian thực."
     except ProviderError:
-        return "Không tra được tin tức lúc này. Kiểm tra GROQ_API_KEY và thử lại."
+        return "Không tìm thấy dữ liệu thời gian thực đã được xác minh lúc này. Không dùng dữ liệu cũ hoặc tự bịa."
 
 
 async def _cmd_quote(user: User, argument: str) -> str:

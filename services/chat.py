@@ -13,7 +13,7 @@ Không bịa dữ liệu hiện hành. Nếu thiếu dữ liệu, nói rõ giớ
 Tôn trọng riêng tư: không suy đoán hay tiết lộ dữ liệu của người dùng khác.
 Trả lời ngắn gọn trước, bổ sung chi tiết khi cần."""
 
-_REALTIME_NEWS_MARKERS = (
+_REALTIME_MARKERS = (
     "tin tức hôm nay",
     "tin tức mới nhất",
     "tin mới nhất",
@@ -23,14 +23,42 @@ _REALTIME_NEWS_MARKERS = (
     "tin trong ngày",
     "tin mới",
     "cập nhật tin tức",
-    "news today",
     "latest news",
+    "news today",
+    "giá hiện tại",
+    "giá hôm nay",
+    "giá mới nhất",
+    "giá bao nhiêu hiện tại",
+    "hiện tại bao nhiêu",
+    "hôm nay bao nhiêu",
+    "tỷ giá hôm nay",
+    "tỷ giá hiện tại",
+    "giá vàng hôm nay",
+    "giá vàng hiện tại",
+    "bitcoin hôm nay",
+    "btc hôm nay",
+    "thời tiết hôm nay",
+    "thời tiết hiện tại",
+    "bây giờ",
+    "hiện giờ",
+    "mới nhất",
+    "cập nhật mới nhất",
+    "latest",
+    "today",
+    "right now",
+    "currently",
 )
 
 
-def _is_realtime_news_request(text: str) -> bool:
+def _is_realtime_request(text: str) -> bool:
     normalized = " ".join(text.casefold().split())
-    return any(marker in normalized for marker in _REALTIME_NEWS_MARKERS)
+    if any(marker in normalized for marker in _REALTIME_MARKERS):
+        return True
+
+    # Natural-language product/market price queries without explicit "hôm nay".
+    price_words = ("giá ", "giá của ", "bao nhiêu tiền", "giá bán")
+    product_words = ("samsung", "iphone", "xiaomi", "oppo", "laptop", "điện thoại", "macbook")
+    return any(w in normalized for w in price_words) and any(w in normalized for w in product_words)
 
 
 async def _system_with_knowledge(query: str, *, rag_enabled: bool) -> str:
@@ -52,28 +80,21 @@ async def chat(user: User, text: str) -> tuple[str, str]:
 
     lock = await user_lock(user.id)
     async with lock:
-        # Các câu hỏi tin tức hiện hành phải đi qua web-search provider.
-        # Nếu để router.text() xử lý, Groq chat thường không có dữ liệu web
-        # và có thể trả lời sai rằng nó không có quyền truy cập realtime.
-        if _is_realtime_news_request(text):
+        # Mọi yêu cầu cần dữ liệu hiện hành đều phải qua realtime web search.
+        # Không fallback sang LLM chat thường vì đó có thể là dữ liệu cũ.
+        if _is_realtime_request(text):
             try:
                 response = await router.macro_news(text)
             except ProviderError:
-                response = await router.text(
-                    TaskType.CHAT,
-                    [
-                        {
-                            "role": "user",
-                            "content": (
-                                text
-                                + "\n\nNếu không thể truy cập web theo thời gian thực, "
-                                "hãy nói rõ không thể xác minh tin hiện tại; tuyệt đối không "
-                                "bịa tin hoặc giả lập dữ liệu mới nhất."
-                            ),
-                        }
-                    ],
-                    system=SYSTEM_PROMPT,
-                )
+                response = await router.product_search(text) if any(
+                    word in text.casefold() for word in ("giá ", "giá của ", "giá bán", "bao nhiêu tiền")
+                ) else None
+                if response is None:
+                    return (
+                        "Không tìm thấy dữ liệu thời gian thực đã được xác minh lúc này. "
+                        "Tôi không có đủ kết quả web để trả lời mà không bịa thông tin.",
+                        "realtime-unavailable",
+                    )
         else:
             history = await database.history(user.id, settings.chat_history_turns)
             messages = [*history, {"role": "user", "content": text}]
