@@ -19,14 +19,10 @@ Handler = Callable[[User, str], Awaitable[str]]
 @dataclass(frozen=True)
 class Command:
     handler: Handler
-    help: str  # 1 dòng mô tả, dùng để sinh text /start — xem bot.py
+    help: str
 
 
 async def try_ticker_quote(text: str) -> str | None:
-    """Gõ đúng 3 chữ cái (không kèm lệnh) được hiểu là tra nhanh giá, kiểu /quote rút gọn.
-    Trả None nếu không phải mã hợp lệ hoặc tra lỗi (mã không tồn tại, mạng lỗi tạm thời...)
-    — để caller rơi về chat bình thường thay vì hiện lỗi khó hiểu cho 1 câu chat ngẫu nhiên
-    tình cờ có đúng 3 chữ cái (vd "cho", "khi")."""
     candidate = text.strip()
     if len(candidate) != 3 or not candidate.isalpha() or not candidate.isascii():
         return None
@@ -42,9 +38,9 @@ async def _cmd_gia(user: User, argument: str) -> str:
     try:
         return (await router.product_search(argument)).text
     except GroundingUnavailable:
-        return "Chưa cấu hình Google Search hoặc chưa xác minh được giá."
+        return "Chưa cấu hình dịch vụ tìm kiếm thời gian thực."
     except ProviderError:
-        return "Không tra được giá lúc này (lỗi tạm thời), vui lòng thử lại sau."
+        return "Không tra được giá lúc này. Kiểm tra GROQ_API_KEY và thử lại."
 
 
 async def _cmd_prompt(user: User, argument: str) -> str:
@@ -54,7 +50,7 @@ async def _cmd_prompt(user: User, argument: str) -> str:
         result = (await text_to_prompt(user, argument))[0].strip()
         if not result:
             return "AI không trả về prompt, thử lại sau."
-        return f"📝 Prompt gợi ý\\n{prompt_spec(argument).hint}\\n\\n{result}"
+        return f"📝 Prompt gợi ý\n{prompt_spec(argument).hint}\n\n{result}"
     except ProviderError:
         return "Không tạo được prompt lúc này (provider AI đang lỗi hoặc hết hạn mức), thử lại sau."
 
@@ -82,9 +78,9 @@ async def _cmd_vimo(user: User, argument: str) -> str:
     try:
         return (await router.macro_news(argument)).text
     except GroundingUnavailable:
-        return "Chưa cấu hình Google Search hoặc chưa xác minh được thông tin."
+        return "Chưa cấu hình dịch vụ tìm kiếm thời gian thực."
     except ProviderError:
-        return "Không tra được thông tin lúc này (lỗi tạm thời), vui lòng thử lại sau."
+        return "Không tra được tin tức lúc này. Kiểm tra GROQ_API_KEY và thử lại."
 
 
 async def _cmd_quote(user: User, argument: str) -> str:
@@ -146,9 +142,6 @@ async def _cmd_danhmuc(user: User, argument: str) -> str:
 
 
 async def _cmd_rag(user: User, argument: str) -> str:
-    """Bật/tắt tra cứu knowledge base (RAG) cho user. Không tham số -> xem trạng thái hiện
-    tại kèm nút bấm nhanh (nút hiển thị ở bot.py, phần command này chỉ trả text thuần vì
-    services/ không phụ thuộc thư viện Telegram)."""
     choice = argument.strip().lower()
     if choice in {"on", "bat", "bật"}:
         await database.set_rag_enabled(user.id, True)
@@ -160,11 +153,6 @@ async def _cmd_rag(user: User, argument: str) -> str:
     return f"Trạng thái RAG hiện tại: {status}\nCú pháp: /rag on | /rag off"
 
 
-# Nguồn sự thật DUY NHẤT cho các lệnh "text vào - text ra" chung. bot.py dùng chính dict
-# này để đăng ký CommandHandler VÀ để sinh text hướng dẫn trong /start — thêm 1 lệnh mới
-# chỉ cần thêm đúng 1 dòng ở đây, không phải sửa nhiều chỗ và không có gì nhắc nếu quên.
-# (Các lệnh có hành vi đặc biệt — /start, /zalologin, /kbreindex, /zalopair...,
-# /zalodanhsach — không theo khuôn (user, argument) -> str nên đăng ký riêng trong bot.py.)
 COMMANDS: dict[str, Command] = {
     "/gia": Command(_cmd_gia, "/gia <sản phẩm> — tra giá bán hiện tại"),
     "/prompt": Command(_cmd_prompt, "/prompt <mô tả ảnh> — viết prompt tạo ảnh"),
