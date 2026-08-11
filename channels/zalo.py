@@ -15,7 +15,9 @@ import httpx
 from ai import router
 from ai.contracts import TaskType
 from core import database
+from core.config import settings
 from core.models import User
+from services.concurrency import assistant_turn
 
 GROUP_COMMANDS = {"/nhom", "/nhomzalo", "/themnhom", "/xoanhom", "/tongket"}
 _IMAGE_TIMEOUT = httpx.Timeout(30.0)
@@ -164,11 +166,12 @@ async def summarize_group(user: User, alias: str, period: str) -> str:
         + "\n"
         + transcript
     )
-    response = await router.text(
-        TaskType.CHAT,
-        [{"role": "user", "content": prompt}],
-        system="Chỉ tóm tắt nội dung được cung cấp; không thêm dữ kiện bên ngoài.",
-        temperature=0.2,
-    )
+    async with assistant_turn(settings.ai_max_concurrency):
+        response = await router.text(
+            TaskType.CHAT,
+            [{"role": "user", "content": prompt}],
+            system="Chỉ tóm tắt nội dung được cung cấp; không thêm dữ kiện bên ngoài.",
+            temperature=0.2,
+        )
     await database.zalo_save_summary(group_id, user.id, period_start, period_end, response.text)
     return response.text
