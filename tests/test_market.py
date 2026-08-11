@@ -252,3 +252,21 @@ def _fake_series_for_quote(today: str) -> market.Series:
     return market.Series(
         "HPG", [27000, 27100], [27200, 27300], [26900, 27000], [1000, 1200], [previous, today]
     )
+
+
+async def test_fetch_quote_requests_enough_history_for_previous_close(monkeypatch):
+    captured = {}
+
+    async def fake_fetch(symbol, days=120, ttl=90):
+        captured["days"] = days
+        return _fake_series_for_quote("2026-08-11")
+
+    monkeypatch.setattr(market, "fetch", fake_fetch)
+    monkeypatch.setattr(market, "fetch_realtime_tick", lambda *args, **kwargs: 27450)
+
+    quote = await market.fetch_quote("HPG")
+
+    assert captured["days"] == 60
+    assert quote.price == 27450
+    assert quote.prev_close == 27000
+    assert quote.is_realtime is True

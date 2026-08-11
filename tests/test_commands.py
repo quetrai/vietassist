@@ -28,15 +28,21 @@ async def test_try_ticker_quote_ignores_non_3_letter_text(monkeypatch):
     assert await commands.try_ticker_quote("") is None
 
 
-async def test_try_ticker_quote_falls_back_silently_on_error(monkeypatch):
-    """Regression: chat ngẫu nhiên trùng 3 chữ cái (vd 'cho', 'khi') không được hiện lỗi tra
-    giá, phải im lặng rơi về chat bình thường."""
+async def test_try_ticker_quote_ignores_unknown_three_letter_word(monkeypatch):
+    async def fail_quick_quote(symbol):
+        raise AssertionError("không được gọi quick_quote cho từ không phải mã đã biết")
 
-    async def fake_quick_quote(symbol):
-        raise ValueError("Mã cổ phiếu phải gồm 3 chữ cái")
-
-    monkeypatch.setattr(commands, "quick_quote", fake_quick_quote)
+    monkeypatch.setattr(commands, "quick_quote", fail_quick_quote)
     assert await commands.try_ticker_quote("cho") is None
+
+
+async def test_try_ticker_quote_returns_error_for_known_symbol(monkeypatch):
+    async def fail_quick_quote(symbol):
+        raise RuntimeError("nguồn realtime tạm thời không khả dụng")
+
+    monkeypatch.setattr(commands, "quick_quote", fail_quick_quote)
+    result = await commands.try_ticker_quote("hpg")
+    assert result == "Không lấy được giá HPG: nguồn realtime tạm thời không khả dụng"
 
 
 async def test_rag_status_no_argument(monkeypatch):
