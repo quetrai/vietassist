@@ -100,32 +100,35 @@ class AIRouter:
             raise ValueError("Thiếu sản phẩm cần tìm")
 
         prompt = (
-            "Tra giá bán hiện tại của sản phẩm sau tại Việt Nam bằng web search. "
+            "Bạn đang xử lý một yêu cầu TRA GIÁ THỜI GIAN THỰC tại Việt Nam. "
+            "Bắt buộc dùng web search. Chỉ trả lời bằng dữ liệu vừa tìm được từ web. "
+            "Không dùng kiến thức trong model để suy đoán giá hiện tại. "
             "Ưu tiên website chính hãng và nhà bán lẻ lớn. "
-            "Trả lời tiếng Việt. Nêu đúng phiên bản/dung lượng nếu xác định được, "
-            "giá hiện tại hoặc giá đang khuyến mãi, tên cửa hàng, thời điểm kiểm tra "
-            "và nguồn. Nếu có nhiều mức giá, liệt kê các mức đáng tin cậy. "
-            "Không được tự đoán giá. Nếu không tìm thấy dữ liệu đủ mới, nói rõ chưa xác minh được.\n\n"
-            + query
+            "Nêu đúng phiên bản/dung lượng nếu xác định được, giá hiện tại/khuyến mãi, "
+            "tên nhà bán lẻ, thời điểm kiểm tra và nguồn/link nếu có. "
+            "Nếu không tìm thấy kết quả đủ mới hoặc không xác minh được giá, hãy nói rõ "
+            "KHÔNG TÌM THẤY DỮ LIỆU GIÁ ĐÃ XÁC MINH và không đưa ra con số đoán.\n\n"
+            f"Yêu cầu: {query}"
         )
 
         errors: list[str] = []
-        # Primary: Groq Compound Mini có web search native.
+
+        # Google Search grounding là nguồn realtime chính.
         try:
-            return await self.groq_realtime.generate(
+            return await self.google.grounded_search(prompt, require_evidence=True)
+        except ProviderError as exc:
+            errors.append(str(exc))
+            logger.warning("Realtime product search via Google failed: %s", exc)
+
+        # Groq Compound Mini là fallback realtime thứ hai.
+        try:
+            return await self.groq_realtime.generate_realtime(
                 [{"role": "user", "content": prompt}],
                 temperature=0.1,
             )
         except ProviderError as exc:
             errors.append(str(exc))
             logger.warning("Realtime product search via Groq failed: %s", exc)
-
-        # Fallback: Google grounding nếu GOOGLE_API_KEY đang được cấu hình.
-        try:
-            return await self.google.grounded_search(prompt)
-        except ProviderError as exc:
-            errors.append(str(exc))
-            logger.warning("Realtime product search via Google failed: %s", exc)
 
         raise ProviderError("product search failed: " + " | ".join(errors))
 
@@ -134,29 +137,37 @@ class AIRouter:
             raise ValueError("Thiếu câu hỏi cần tra")
 
         prompt = (
-            "Tra cứu web theo thời gian thực cho yêu cầu sau. "
-            "Nếu yêu cầu chỉ nói 'tin tức hôm nay' hoặc tương đương, hãy tổng hợp các tin "
-            "đáng chú ý trong ngày hiện tại, ưu tiên Việt Nam, kinh tế, chứng khoán, công nghệ. "
-            "Trả lời tiếng Việt. Mỗi tin cần có tiêu đề, thời điểm/ngày, tóm tắt ngắn và nguồn. "
-            "Chỉ dùng thông tin tìm được trên web; không bịa và không dùng kiến thức cũ để giả làm tin mới. "
-            "Nếu không xác minh được thông tin hiện tại, nói rõ.\n\n" + query
+            "Bạn đang xử lý một yêu cầu TIN TỨC/THÔNG TIN THỜI GIAN THỰC. "
+            "Bắt buộc dùng web search. Chỉ sử dụng thông tin có trong kết quả web vừa tìm được. "
+            "TUYỆT ĐỐI KHÔNG dùng kiến thức cũ để giả làm tin mới và không bịa ngày tháng. "
+            "Nếu người dùng hỏi 'tin tức hôm nay', 'tin mới nhất' hoặc tương đương, "
+            "chỉ đưa các bài có ngày xuất bản phù hợp với ngày hiện tại hoặc rất gần hiện tại "
+            "và phải ghi rõ ngày/giờ nếu nguồn cung cấp. Loại bỏ kết quả cũ, không rõ ngày hoặc "
+            "không thể xác minh. Ưu tiên nguồn báo chí/chính thống uy tín. "
+            "Mỗi tin cần có tiêu đề, ngày/giờ nếu có, tóm tắt ngắn và nguồn. "
+            "Nếu không có kết quả đủ mới và xác minh được, trả lời rõ rằng không có dữ liệu "
+            "thời gian thực đã xác minh; KHÔNG được thay bằng tin cũ.\n\n"
+            f"Yêu cầu: {query}"
         )
 
         errors: list[str] = []
+
+        # Google Search grounding là nguồn realtime chính.
         try:
-            return await self.groq_realtime.generate(
+            return await self.google.grounded_search(prompt, require_evidence=True)
+        except ProviderError as exc:
+            errors.append(str(exc))
+            logger.warning("Realtime news search via Google failed: %s", exc)
+
+        # Groq Compound Mini là fallback realtime thứ hai.
+        try:
+            return await self.groq_realtime.generate_realtime(
                 [{"role": "user", "content": prompt}],
                 temperature=0.1,
             )
         except ProviderError as exc:
             errors.append(str(exc))
             logger.warning("Realtime news search via Groq failed: %s", exc)
-
-        try:
-            return await self.google.grounded_search(prompt)
-        except ProviderError as exc:
-            errors.append(str(exc))
-            logger.warning("Realtime news search via Google failed: %s", exc)
 
         raise ProviderError("news search failed: " + " | ".join(errors))
 
