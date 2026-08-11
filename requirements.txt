@@ -5,6 +5,6 @@ httpx==0.28.1
 asyncpg==0.30.0
 python-dotenv==1.1.1
 google-genai==2.13.0
-pydantic==2.11.7
+pydantic==2.12.5
 cryptography==45.0.5
 vnstock==3.2.6
