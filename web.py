@@ -222,17 +222,28 @@ async def post_zalo_qr(
     payload: ZaloQrPayload, x_bridge_secret: str = Header(default="")
 ) -> dict[str, bool]:
     _check_bridge_secret(x_bridge_secret)
+    encoded = payload.image_base64.strip()
+    if encoded.startswith("data:"):
+        _, separator, encoded = encoded.partition(",")
+        if not separator:
+            raise HTTPException(400, "QR payload không hợp lệ")
     try:
-        image_bytes = base64.b64decode(payload.image_base64, validate=True)
-    except ValueError as exc:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
         raise HTTPException(400, "QR payload không hợp lệ") from exc
-    if telegram is not None and settings.telegram_owner_id:
-        with contextlib.suppress(Exception):
-            await telegram.bot.send_photo(
-                chat_id=settings.telegram_owner_id,
-                photo=image_bytes,
-                caption="Quét mã QR này bằng app Zalo (tài khoản B) để đăng nhập. Mã có thể hết hạn sau ít phút.",
-            )
+    if not image_bytes:
+        raise HTTPException(400, "QR payload rỗng")
+    if telegram is None or not settings.telegram_owner_id:
+        raise HTTPException(503, "Telegram chưa sẵn sàng để nhận mã QR")
+    try:
+        await telegram.bot.send_photo(
+            chat_id=settings.telegram_owner_id,
+            photo=image_bytes,
+            caption="Quét mã QR này bằng app Zalo (tài khoản B) để đăng nhập. Mã có thể hết hạn sau ít phút.",
+        )
+    except Exception as exc:
+        logger.exception("Không gửi được mã QR Zalo tới Telegram")
+        raise HTTPException(503, "Không gửi được mã QR tới Telegram") from exc
     return {"ok": True}
 
 
