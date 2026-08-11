@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from google.genai import types
 from ai.contracts import AIResponse, GroundingUnavailable, ProviderError, ProviderUnavailable
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 # Gemini chỉ chấp nhận role "user"/"model" — map từ role kiểu OpenAI ("assistant") sang.
 _ROLE_MAP = {"user": "user", "assistant": "model"}
@@ -111,19 +113,39 @@ class GoogleProvider:
     async def grounded_search(self, prompt: str) -> AIResponse:
         if self.client is None:
             raise GroundingUnavailable("Google API chưa được cấu hình")
-        config = types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
+
+        # Google Search grounding is supported by current Gemini Flash models.
+        # Keep a stable fallback because model availability/configuration can differ
+        # between API projects during model rollouts.
+        models = []
+        for model in (self.model, "gemini-2.5-flash"):
+            if model and model not in models:
+                models.append(model)
+
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+
+        errors: list[str] = []
         async with self.semaphore:
-            try:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model, contents=prompt, config=config
-                )
-                if not response.text:
-                    raise GroundingUnavailable("Google Search không trả dữ liệu")
-                return AIResponse(response.text.strip(), "google", self.model, True, response)
-            except GroundingUnavailable:
-                raise
-            except Exception as exc:
-                raise ProviderError(f"google: {type(exc).__name__}") from exc
+            for model in models:
+                try:
+                    response = await self.client.aio.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=config,
+                    )
+                    text = (response.text or "").strip()
+                    if not text:
+                        errors.append(f"{model}: empty response")
+                        continue
+                    return AIResponse(text, "google", model, True, response)
+                except Exception as exc:
+                    error = f"{model}: {type(exc).__name__}: {exc}"
+                    errors.append(error)
+                    logger.warning("Google Search grounding failed: %s", error)
+
+        raise ProviderError("Google Search grounding failed: " + " | ".join(errors))
 
     async def image_to_prompt(self, path: str, instruction: str) -> AIResponse:
         if self.client is None:
