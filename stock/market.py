@@ -127,7 +127,7 @@ async def fetch_realtime_tick(symbol: str, ttl: int = REALTIME_CACHE_TTL_SEC) ->
 async def fetch_quote(symbol: str, ttl: int = REALTIME_CACHE_TTL_SEC) -> Quote:
     """Quote ưu tiên tick realtime; trong giờ giao dịch không fallback về giá cũ."""
     symbol = symbol.upper().strip()
-    series = await fetch(symbol, days=5, ttl=90)
+    series = await fetch(symbol, days=60, ttl=90)
     if len(series.closes) < 1:
         raise RuntimeError(f"Không có dữ liệu giá cho {symbol}")
     tick = await fetch_realtime_tick(symbol, ttl=ttl)
