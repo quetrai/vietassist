@@ -15,6 +15,7 @@ from services.prompt_engine import prompt_spec
 from stock import analyze_symbol, quick_quote
 from stock.fundamentals import build_fundamentals_prompt_section, fetch_fundamentals
 from stock.analysis import normalize_symbol
+from stock.sector import ALL_KNOWN_SYMBOLS
 
 Handler = Callable[[User, str], Awaitable[str]]
 
@@ -29,10 +30,13 @@ async def try_ticker_quote(text: str) -> str | None:
     candidate = text.strip()
     if len(candidate) != 3 or not candidate.isalpha() or not candidate.isascii():
         return None
+    symbol = candidate.upper()
+    if symbol not in ALL_KNOWN_SYMBOLS:
+        return None
     try:
         return await quick_quote(candidate)
-    except (ValueError, RuntimeError):
-        return None
+    except (ValueError, RuntimeError) as exc:
+        return f"Không lấy được giá {symbol}: {exc}"
 
 
 async def _cmd_gia(user: User, argument: str) -> str:
