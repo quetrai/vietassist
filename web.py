@@ -12,29 +12,30 @@ from typing import Literal
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from telegram import Update
+from telegram import MenuButtonCommands, Update
 from telegram.ext import Application
 
 from ai import router
 from ai.contracts import ProviderError, ProviderUnavailable
-from bot import build_application
+from bot import TELEGRAM_MENU, build_application
 from channels.zalo import ZaloEvent, download_image, is_group_command, resolve_user, summarize_group
 from core import database, knowledge
 from core.config import settings
 from core.models import Channel, User
-from services import commands, zalo_groups
+from services import commands, memory, zalo_groups
 from services.chat import chat
 from services.maintenance import cleanup_loop
+from services.concurrency import assistant_turn
 from services.prompt_engine import build_image_prompt_instruction
 from services.reminders import reminder_loop
 from services.zalo_digest import daily_digest_loop
+from services.zalo_push import close as close_zalo_push, outbox_loop
 from stock.market import close as close_stock
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 telegram: Application | None = None
 _DEFAULT_IMAGE_INSTRUCTION = "Tái tạo chính xác ảnh tham chiếu thành prompt tiếng Anh, giữ nguyên bố cục, dáng, ánh sáng, camera và chất ảnh."
-_notified_unpaired_senders: set[str] = set()
 
 
 class BridgeEvent(BaseModel):
@@ -90,19 +91,24 @@ async def lifespan(_: FastAPI):
     telegram = build_application()
     await telegram.initialize()
     await telegram.start()
+    await telegram.bot.set_my_commands(TELEGRAM_MENU)
+    await telegram.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     await telegram.bot.set_webhook(
         settings.webhook_base_url.rstrip("/") + "/webhook",
         secret_token=settings.webhook_secret,
         allowed_updates=["message", "callback_query"],
     )
     digest_task = asyncio.create_task(daily_digest_loop()) if settings.zalo_enabled else None
+    outbox_task = asyncio.create_task(outbox_loop()) if settings.zalo_enabled else None
     reminder_task = asyncio.create_task(reminder_loop(telegram.bot))
-    reindex_task = asyncio.create_task(_startup_reindex())
+    reindex_task = asyncio.create_task(_startup_reindex()) if settings.reindex_on_startup else None
     cleanup_task = asyncio.create_task(cleanup_loop())
     try:
         yield
     finally:
-        for task in (reminder_task, reindex_task, cleanup_task):
+        for task in (reminder_task, reindex_task, cleanup_task, outbox_task):
+            if task is None:
+                continue
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -114,6 +120,8 @@ async def lifespan(_: FastAPI):
         await telegram.shutdown()
         await router.close()
         await close_stock()
+        await close_zalo_push()
+        await memory.shutdown()
         await database.close()
         telegram = None
 
@@ -124,7 +132,6 @@ app = FastAPI(title="VietAssist", lifespan=lifespan)
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health() -> dict[str, str]:
-    """Lightweight liveness endpoint for Render/UptimeRobot."""
     return {"status": "ok"}
 
 
@@ -173,10 +180,17 @@ async def bridge_event(
     _check_bridge_secret(x_bridge_secret)
     lease_token = await database.claim_event(Channel.ZALO, payload.event_id)
     if lease_token is None:
+        cached = await database.get_zalo_event_response(payload.event_id)
+        if cached is not None:
+            return BridgeReply(messages=cached)
+        state = await database.event_state(Channel.ZALO, payload.event_id)
+        if state == "processing":
+            raise HTTPException(503, "Event đang được xử lý")
         return BridgeReply(messages=[])
     event = ZaloEvent(**payload.model_dump())
     try:
         result = await _handle_zalo_event(event)
+        await database.save_zalo_event_response(event.event_id, result.messages)
     except Exception as exc:
         with contextlib.suppress(Exception):
             await database.fail_event(
@@ -238,21 +252,6 @@ async def post_zalo_login_result(
     return {"ok": True}
 
 
-async def _notify_owner_unpaired_sender(sender_id: str, sender_name: str) -> None:
-    if not sender_id or sender_id in _notified_unpaired_senders:
-        return
-    if telegram is None or not settings.telegram_owner_id:
-        return
-    _notified_unpaired_senders.add(sender_id)
-    ten = f" ({sender_name})" if sender_name else ""
-    text = (
-        f"🔔 Zalo id={sender_id}{ten} vừa nhắn cho Zalo B nhưng chưa được cấp quyền.\n"
-        f"Dùng /zaloadmin {sender_id} để đặt làm admin, hoặc /zalopair {sender_id} để cấp quyền user."
-    )
-    with contextlib.suppress(Exception):
-        await telegram.bot.send_message(chat_id=settings.telegram_owner_id, text=text)
-
-
 async def _handle_zalo_event(event: ZaloEvent) -> BridgeReply:
     text = event.text.strip()
     if event.kind == "group":
@@ -276,25 +275,22 @@ async def _handle_zalo_event(event: ZaloEvent) -> BridgeReply:
         )
         return BridgeReply(messages=[])
     user = await resolve_user(event.sender_id)
-    if user is None:
-        await _notify_owner_unpaired_sender(event.sender_id, event.sender_name)
-        return BridgeReply(
-            messages=[
-                "Tài khoản chưa được cấp quyền dùng VietAssist. Nhờ quản trị viên pair qua Telegram."
-            ]
-        )
+    if user is None or not user.paired:
+        return BridgeReply(messages=[])
     if not user.active:
         return BridgeReply(messages=["Tài khoản đang bị tạm khóa."])
     if event.kind == "image":
         return await _handle_zalo_image(event)
+
     command_result = await commands.handle(user, text)
     if command_result is not None:
         return BridgeReply(messages=[command_result])
     quote = await commands.try_ticker_quote(text)
     if quote is not None:
         return BridgeReply(messages=[quote])
+
     result, provider = await chat(user, text)
-    return BridgeReply(messages=[result, f"⚙️ {provider}"])
+    return BridgeReply(messages=[result, "⚙️ " + provider])
 
 
 async def _handle_zalo_image(event: ZaloEvent) -> BridgeReply:
@@ -309,7 +305,8 @@ async def _handle_zalo_image(event: ZaloEvent) -> BridgeReply:
     except httpx.HTTPError:
         return BridgeReply(messages=["Không tải được ảnh từ Zalo, thử gửi lại."])
     try:
-        response = await router.image_prompt(path, instruction)
+        async with assistant_turn(settings.ai_max_concurrency):
+            response = await router.image_prompt(path, instruction)
     except ProviderUnavailable:
         return BridgeReply(messages=["Chưa cấu hình Google Gemini để xử lý ảnh."])
     except ProviderError:

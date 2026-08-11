@@ -7,7 +7,6 @@ RUN pip install -r requirements.txt
 COPY zalo-gateway/package*.json zalo-gateway/tsconfig.json ./zalo-gateway/
 RUN cd zalo-gateway && npm ci
 COPY . .
-# Explicitly copy the gateway sources so the TypeScript build cannot rely on a stale/cached COPY layer.
 COPY zalo-gateway/src ./zalo-gateway/src
 RUN test -f zalo-gateway/src/index.ts && test -f zalo-gateway/src/format.ts
 RUN cd zalo-gateway && npm run build && npm prune --omit=dev

@@ -15,6 +15,7 @@ tự bịa số liệu), ghi chú, nhắc nhở, theo dõi danh mục đầu tư
 - [Deploy production](#deploy-production)
 - [Kiểm tra / CI thủ công](#kiểm-tra--ci-thủ-công)
 - [Vận hành & xử lý sự cố](#vận-hành--xử-lý-sự-cố)
+- [UptimeRobot & chống spin down](#uptimerobot--chống-spin-down)
 - [Giới hạn đã biết](#giới-hạn-đã-biết)
 
 ## Kiến trúc
@@ -44,8 +45,7 @@ tự bịa số liệu), ghi chú, nhắc nhở, theo dõi danh mục đầu tư
   chỉ báo nếu thị trường chưa đóng cửa, để tín hiệu không đổi qua lại giữa phiên. Mọi
   quyết định/tín hiệu tính bằng code thuần (`stock/policy.py`, có thêm chặn thanh khoản
   thấp và trần rủi ro stop) — LLM chỉ được dùng để diễn giải kết quả đã tính sẵn, không
-  bao giờ tự tính hay tự đưa ra khuyến nghị số liệu. Các ngưỡng trong `policy.py` là ước
-  lượng thô, chưa qua backtest — tự điều chỉnh nếu cần.
+  bao giờ tự tính hay tự đưa ra khuyến nghị số liệu. Các ngưỡng trong `policy.py` là ước lượng thô. Repo không tích hợp backtest, walk-forward hoặc optimizer; nếu cần hiệu chỉnh ngưỡng, thực hiện ngoài production.
 - **Dữ liệu:** PostgreSQL (khuyến nghị Supabase), cô lập theo `user_id`. Session đăng nhập
   Zalo được mã hoá at-rest; `SETTINGS_ENC_KEY` bắt buộc khi bật Zalo.
 - **Web server:** FastAPI (`web.py`) phục vụ webhook Telegram + endpoint cầu nối
@@ -160,13 +160,13 @@ người.
 4. Bot báo "Đăng nhập Zalo B thành công" — từ giờ container restart không cần quét lại
    (session được lưu, mã hoá nếu có `SETTINGS_ENC_KEY`).
 
-**Cấp quyền cho người dùng:** người dùng Zalo A nhắn bất kỳ gì cho Zalo B lần đầu sẽ nhận
-thông báo "chưa được cấp quyền"; đồng thời Telegram owner nhận thông báo kèm sẵn lệnh
-`/zalopair <id> để pair`. Dùng `/zaloadmin <id>` thay vì `/zalopair` nếu muốn người đó
-dùng được tính năng quản lý nhóm.
+**Cấp quyền cho người dùng:** người dùng Zalo A có thể nhắn tin cho Zalo B bình thường
+trước khi pair. VietAssist không trả lời AI và không xử lý lệnh ở giai đoạn này. Khi owner
+Telegram dùng `/zalopair <id>`, tài khoản đó mới được chuyển sang bot mode. Dùng
+`/zaloadmin <id>` nếu muốn cấp quyền quản lý nhóm.
 
-**Dùng trong chat 1-1 với Zalo B:** toàn bộ lệnh ở mục "Sử dụng — lệnh Telegram" phía trên
-đều dùng được (gõ y hệt, có dấu `/`), trừ các lệnh quản trị Zalo/Telegram-only
+**Dùng trong chat 1-1 với Zalo B:** sau khi pair, toàn bộ lệnh ở mục "Sử dụng — lệnh Telegram"
+phía trên đều dùng được (gõ y hệt, có dấu `/`), trừ các lệnh quản trị Zalo/Telegram-only
 (`/zalopair`, `/zaloadmin`, `/zalologin`...). Ngoài ra:
 - **Gửi ảnh trực tiếp cho Zalo B** (không cần gõ `/prompt`) → bot tự nhận diện, phân tích
   ảnh bằng Gemini vision và trả lời prompt tái tạo. Gõ kèm caption cùng ảnh nếu muốn định
@@ -208,15 +208,45 @@ Việc cần làm thủ công trên Render dashboard (không nằm trong `render
 3. Nếu dùng Zalo, đổi `ZALO_ENABLED` thành `true` trong `render.yaml` hoặc override trên
    dashboard, rồi làm theo mục "Sử dụng — Zalo" ở trên (`/zalologin` qua Telegram).
 
-**Health check:** `GET /` là liveness. `GET /ready` kiểm tra process Telegram và PostgreSQL;
-đặt Render health check vào `/ready` để deployment chỉ được xem là ready khi DB đã hoạt động.
+**Health check:** `GET /health` là endpoint liveness nhẹ, không gọi AI, Zalo hoặc PostgreSQL.
+Render dùng `/health` cho health check và UptimeRobot có thể ping cùng endpoint này để tạo
+inbound traffic định kỳ. `GET /ready` là readiness check thủ công, kiểm tra process Telegram
+và PostgreSQL; dùng endpoint này để chẩn đoán khi service chưa sẵn sàng, không dùng làm endpoint
+UptimeRobot.
 
-**Giới hạn Render free plan:** service ngủ sau ~15 phút không có traffic. Vòng lặp nhắc
-nhở (`reminder_loop`) và digest hằng ngày (`daily_digest_loop`) chỉ chạy khi process còn
-sống — nếu bot không có traffic đều đặn, nhắc nhở có thể trễ hoặc không bắn đúng giờ. Cân
-nhắc nâng plan trả phí nếu tính năng nhắc nhở là thiết yếu.
+**Giới hạn Render free plan:** service có thể spin down sau khoảng 15 phút không có inbound
+traffic. Nếu muốn giảm khả năng spin down, cấu hình UptimeRobot monitor ping `GET /health`
+định kỳ, nên đặt chu kỳ thấp hơn 15 phút (ví dụ 5 phút). `/health` được thiết kế cực nhẹ để
+việc ping định kỳ không tạo truy vấn database hoặc gọi AI. UptimeRobot chỉ giúp duy trì traffic
+để hạn chế idle spin down; nó **không biến Render Free thành dịch vụ có SLA 24/7**. Nếu instance
+đã sleep hoặc bị restart vì lý do khác, các background loop trong process vẫn có thể bị gián đoạn.
+Đặc biệt, `reminder_loop` và `daily_digest_loop` không nên được xem là scheduler có SLA tuyệt đối
+trên Render Free. Nếu reminder/digest đúng giờ là yêu cầu bắt buộc, nên chuyển scheduler sang một
+dịch vụ có khả năng chạy job độc lập.
 
-## Kiểm tra / CI thủ công
+### UptimeRobot & chống spin down
+
+VietAssist được thiết kế để dùng UptimeRobot với endpoint `/health`. Cấu hình monitor HTTP(s)
+trỏ tới URL public của service, ví dụ:
+
+```text
+https://<ten-service>.onrender.com/health
+```
+
+Thiết lập chu kỳ kiểm tra **5 phút** hoặc một chu kỳ khác nhỏ hơn 15 phút. Không cần ping `/ready`
+cho mục đích này vì `/ready` có truy vấn PostgreSQL và được dành cho readiness/diagnostics.
+
+Quy trình kiểm tra:
+
+1. Mở UptimeRobot và tạo hoặc chỉnh HTTP(s) monitor.
+2. Đặt URL là `https://<ten-service>.onrender.com/health`.
+3. Đặt monitoring interval nhỏ hơn 15 phút; 5 phút là lựa chọn phù hợp.
+4. Sau khi deploy, xác nhận monitor nhận HTTP `200`.
+5. Khi cần kiểm tra dependency, mở `https://<ten-service>.onrender.com/ready` hoặc xem log Render.
+
+UptimeRobot monitor hiện tại của VietAssist có thể tiếp tục dùng nếu đang trỏ đúng tới `/health`.
+
+## Kiểm tra thủ công
 
 Chưa có CI tự động (không có `.github/workflows/`) — chạy tay trước khi commit:
 
@@ -264,6 +294,3 @@ nhân/nhóm nhỏ, không phải oversight:
   hiện tại).
 - **Không có CI tự động** — lint/test phải chạy tay trước khi deploy (xem mục phía trên).
 
-## CI
-
-GitHub Actions validates Python lint/format/tests and the Zalo gateway typecheck/build on every push and pull request.

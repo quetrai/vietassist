@@ -6,7 +6,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -21,6 +21,7 @@ from core import database, knowledge
 from core.config import settings
 from core.models import Channel, Role, User
 from services import commands, zalo_admin, zalo_login
+from services.concurrency import assistant_turn
 from services.chat import chat
 from services.prompt_engine import build_image_prompt_instruction
 from services.tg_format import reply_rich
@@ -28,6 +29,34 @@ from stock.market import close as close_stock
 
 logger = logging.getLogger(__name__)
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+TELEGRAM_MENU = [
+    BotCommand("start", "Bắt đầu VietAssist"),
+    BotCommand("help", "Xem toàn bộ hướng dẫn"),
+    BotCommand("reset", "Xóa ngữ cảnh chat"),
+    BotCommand("memory", "Xem trí nhớ dài hạn"),
+    BotCommand("forget", "Xóa trí nhớ dài hạn"),
+    BotCommand("quote", "Giá cổ phiếu realtime"),
+    BotCommand("gia", "Tra giá sản phẩm hiện tại"),
+    BotCommand("stock", "Phân tích cổ phiếu"),
+    BotCommand("status", "Trạng thái provider AI"),
+    BotCommand("fundamental", "Phân tích cơ bản cổ phiếu"),
+    BotCommand("vimo", "Tin tức và vĩ mô"),
+    BotCommand("danhmuc", "Xem danh mục"),
+    BotCommand("muavao", "Ghi nhận mua cổ phiếu"),
+    BotCommand("banra", "Ghi nhận bán cổ phiếu"),
+    BotCommand("nhac", "Đặt nhắc nhở"),
+    BotCommand("dsnhac", "Xem nhắc nhở"),
+    BotCommand("xoanhac", "Hủy nhắc nhở"),
+    BotCommand("ghichu", "Lưu ghi chú"),
+    BotCommand("xoaghichu", "Xóa ghi chú"),
+    BotCommand("dsghichu", "Xem ghi chú"),
+    BotCommand("prompt", "Tạo prompt ảnh"),
+    BotCommand("rag", "Bật/tắt Knowledge Base"),
+    BotCommand("kbreindex", "Reindex Knowledge Base"),
+    BotCommand("zalologin", "Đăng nhập Zalo B"),
+]
 
 ZALO_ADMIN_COMMANDS = {
     "zalopair": zalo_admin.pair,
@@ -69,6 +98,10 @@ def _start_text() -> str:
     lines.extend(_SPECIAL_COMMANDS_HELP)
     return "\n".join(lines)
 
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(_start_text())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(_start_text())
@@ -224,7 +257,8 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Ảnh quá lớn sau khi tải xuống. Vui lòng gửi ảnh nhỏ hơn 10 MB."
             )
             return
-        response = await router.image_prompt(path, instruction)
+        async with assistant_turn(settings.ai_max_concurrency):
+            response = await router.image_prompt(path, instruction)
         await _reply_prompt(message_obj, response.text, spec.hint)
     except Exception:
         logger.exception("Lỗi chuyển ảnh thành prompt")
@@ -253,6 +287,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def post_init(app: Application) -> None:
     await database.migrate()
+    await app.bot.set_my_commands(TELEGRAM_MENU)
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
 async def post_shutdown(app: Application) -> None:
@@ -274,7 +310,10 @@ def build_application() -> Application:
     owner = filters.User(user_id=settings.telegram_owner_id)
 
     app.add_handler(CommandHandler("start", start, filters=owner))
+    app.add_handler(CommandHandler("help", help_command, filters=owner))
     for name in commands.COMMANDS:
+        if name == "/help":
+            continue
         app.add_handler(CommandHandler(name.lstrip("/"), command, filters=owner))
     for name in ZALO_ADMIN_COMMANDS:
         app.add_handler(CommandHandler(name, zalo_manage, filters=owner))
