@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 from pathlib import Path
 from typing import Any
 
@@ -9,11 +10,12 @@ from google import genai
 from google.genai import types
 
 from ai.contracts import AIResponse, GroundingUnavailable, ProviderError, ProviderUnavailable
+from ai.timeouts import CHAT_TIMEOUT_SEC, GROUNDING_TIMEOUT_SEC, VISION_TIMEOUT_SEC, with_timeout
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
-# Gemini chỉ chấp nhận role "user"/"model" — map từ role kiểu OpenAI ("assistant") sang.
+
 _ROLE_MAP = {"user": "user", "assistant": "model"}
 
 
@@ -48,7 +50,7 @@ def _image_part(path: str) -> types.Part:
     if mime is None:
         raise ProviderError("Định dạng ảnh không được hỗ trợ")
 
-    # Detect common magic bytes so a renamed non-image file is not sent to the model.
+    
     valid = (
         (mime == "image/jpeg" and data[:3] == b"\xff\xd8\xff")
         or (mime == "image/png" and data.startswith(b"\x89PNG\r\n\x1a\n"))
@@ -99,8 +101,10 @@ class GoogleProvider:
         )
         async with self.semaphore:
             try:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model, contents=contents, config=config
+                response = await with_timeout(
+                    self.client.aio.models.generate_content(model=self.model, contents=contents, config=config),
+                    CHAT_TIMEOUT_SEC,
+                    "google chat",
                 )
                 if not response.text:
                     raise ProviderError("google trả kết quả rỗng")
@@ -129,7 +133,7 @@ class GoogleProvider:
         if self.client is None:
             raise GroundingUnavailable("Google API chưa được cấu hình")
 
-        # Keep the configured model first, then stable fallbacks that support Search grounding.
+        
         models = []
         for model in (self.model, "gemini-2.5-flash"):
             if model and model not in models:
@@ -143,10 +147,10 @@ class GoogleProvider:
         async with self.semaphore:
             for model in models:
                 try:
-                    response = await self.client.aio.models.generate_content(
-                        model=model,
-                        contents=prompt,
-                        config=config,
+                    response = await with_timeout(
+                        self.client.aio.models.generate_content(model=model, contents=prompt, config=config),
+                        GROUNDING_TIMEOUT_SEC,
+                        f"google grounding {model}",
                     )
                     text = (response.text or "").strip()
                     if not text:
@@ -169,6 +173,26 @@ class GoogleProvider:
 
         raise ProviderError("Google Search grounding failed: " + " | ".join(errors))
 
+    async def generate_json(self, prompt: str) -> dict[str, Any]:
+        if self.client is None:
+            raise ProviderUnavailable("google chưa được cấu hình")
+        config = types.GenerateContentConfig(temperature=0.1, response_mime_type="application/json")
+        async with self.semaphore:
+            try:
+                response = await with_timeout(
+                    self.client.aio.models.generate_content(model=self.model, contents=prompt, config=config),
+                    CHAT_TIMEOUT_SEC,
+                    "google json",
+                )
+                raw = (response.text or "").strip()
+                if not raw:
+                    raise ProviderError("google trả JSON rỗng")
+                return json.loads(raw)
+            except ProviderError:
+                raise
+            except Exception as exc:
+                raise ProviderError(f"google json: {type(exc).__name__}") from exc
+
     async def image_to_prompt(self, path: str, instruction: str) -> AIResponse:
         if self.client is None:
             raise ProviderUnavailable("Google API chưa được cấu hình")
@@ -181,8 +205,10 @@ class GoogleProvider:
         contents = [part, instruction]
         async with self.semaphore:
             try:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model, contents=contents
+                response = await with_timeout(
+                    self.client.aio.models.generate_content(model=self.model, contents=contents),
+                    VISION_TIMEOUT_SEC,
+                    "google vision",
                 )
                 if not response.text:
                     raise ProviderError("Google trả kết quả rỗng")
