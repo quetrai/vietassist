@@ -26,7 +26,10 @@ async def pool() -> asyncpg.Pool:
     async with _pool_lock:
         if _pool is None:
             _pool = await asyncpg.create_pool(
-                settings.database_url, min_size=1, max_size=10, statement_cache_size=0
+                settings.database_url,
+                min_size=settings.db_pool_min_size,
+                max_size=settings.db_pool_max_size,
+                statement_cache_size=0,
             )
     return _pool
 
@@ -95,6 +98,12 @@ async def migrate() -> None:
         ALTER TABLE processed_events ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
         UPDATE processed_events SET status = 'completed', completed_at = COALESCE(completed_at, created_at)
         WHERE status NOT IN ('processing', 'failed', 'completed');
+        CREATE TABLE IF NOT EXISTS zalo_event_responses (
+          event_id TEXT PRIMARY KEY,
+          response_json JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS zalo_event_responses_cleanup ON zalo_event_responses(created_at);
         CREATE TABLE IF NOT EXISTS zalo_groups (
           group_id TEXT PRIMARY KEY,
           alias TEXT UNIQUE,
@@ -131,6 +140,28 @@ async def migrate() -> None:
         );
         CREATE INDEX IF NOT EXISTS zalo_group_summaries_group_time
           ON zalo_group_summaries(group_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS zalo_outbox (
+          id BIGSERIAL PRIMARY KEY,
+          recipient_id TEXT NOT NULL,
+          content TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          sent_at TIMESTAMPTZ,
+          attempts INT NOT NULL DEFAULT 0,
+          next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          lease_until TIMESTAMPTZ,
+          lease_token UUID,
+          last_error TEXT
+        );
+        ALTER TABLE zalo_outbox ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+        ALTER TABLE zalo_outbox ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ;
+        ALTER TABLE zalo_outbox ADD COLUMN IF NOT EXISTS lease_token UUID;
+        CREATE INDEX IF NOT EXISTS zalo_outbox_pending ON zalo_outbox(next_attempt_at, id)
+          WHERE sent_at IS NULL AND attempts < 8;
+        CREATE INDEX IF NOT EXISTS zalo_outbox_leases ON zalo_outbox(lease_until)
+          WHERE sent_at IS NULL AND lease_until IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS zalo_group_messages_group_time
+          ON zalo_group_messages(group_id, sent_at DESC);
+        CREATE INDEX IF NOT EXISTS zalo_users_activity ON zalo_users(last_active_at DESC);
         CREATE TABLE IF NOT EXISTS notes (
           id BIGSERIAL PRIMARY KEY,
           user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -249,6 +280,31 @@ PROCESSED_EVENTS_RETENTION_DAYS = 30
 GROUP_MESSAGES_RETENTION_DAYS = 90
 
 
+async def get_zalo_event_response(event_id: str) -> list[str] | None:
+    db = await pool()
+    value = await db.fetchval(
+        "SELECT response_json FROM zalo_event_responses WHERE event_id = $1",
+        event_id,
+    )
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = json.loads(value)
+    messages = value.get("messages") if isinstance(value, dict) else None
+    return [str(item) for item in messages] if isinstance(messages, list) else None
+
+
+async def save_zalo_event_response(event_id: str, messages: list[str]) -> None:
+    db = await pool()
+    await db.execute(
+        """INSERT INTO zalo_event_responses(event_id, response_json)
+        VALUES($1, $2::jsonb)
+        ON CONFLICT(event_id) DO NOTHING""",
+        event_id,
+        json.dumps({"messages": messages}, ensure_ascii=False),
+    )
+
+
 async def cleanup_old_data() -> dict[str, int]:
     """Dọn các bảng chỉ-thêm (append-only) không có cơ chế xoá tự nhiên, để không phình
     to vô hạn theo thời gian. `processed_events` chỉ cần giữ đủ lâu hơn khoảng retry tối
@@ -263,9 +319,18 @@ async def cleanup_old_data() -> dict[str, int]:
         f"DELETE FROM zalo_group_messages WHERE sent_at < NOW() - INTERVAL "
         f"'{GROUP_MESSAGES_RETENTION_DAYS} days'"
     )
+    responses_deleted = await db.execute(
+        f"DELETE FROM zalo_event_responses WHERE created_at < NOW() - INTERVAL "
+        f"'{PROCESSED_EVENTS_RETENTION_DAYS} days'"
+    )
+    outbox_deleted = await db.execute(
+        "DELETE FROM zalo_outbox WHERE sent_at IS NOT NULL AND sent_at < NOW() - INTERVAL '30 days'"
+    )
     return {
         "processed_events": _rowcount(events_deleted),
         "zalo_group_messages": _rowcount(messages_deleted),
+        "zalo_event_responses": _rowcount(responses_deleted),
+        "zalo_outbox": _rowcount(outbox_deleted),
     }
 
 
@@ -302,6 +367,15 @@ async def claim_event(channel: Channel, event_id: str) -> str | None:
         EVENT_LEASE_SECONDS,
     )
     return str(row["lease_token"]) if row else None
+
+
+async def event_state(channel: Channel, event_id: str) -> str | None:
+    db = await pool()
+    return await db.fetchval(
+        "SELECT status FROM processed_events WHERE channel = $1 AND event_id = $2",
+        channel.value,
+        event_id,
+    )
 
 
 async def complete_event(channel: Channel, event_id: str, lease_token: str) -> None:
@@ -342,13 +416,18 @@ async def _zalo_ensure_user(conn: asyncpg.Connection, external_id: str) -> dict[
     )
 
 
-def _zalo_user_from_rows(user_row: object, zalo_row: object) -> User:
+def _zalo_user_from_rows(user_row: object, zalo_row: object | None) -> User:
+    paired = zalo_row is not None
+    role = Role.ZALO_ADMIN if paired and zalo_row["zalo_role"] == "admin" else Role.USER
+    active = True if not paired else zalo_row["zalo_status"] == "active"
     return User(
         user_row["id"],
         Channel(user_row["channel"]),
         user_row["external_id"],
-        Role.ZALO_ADMIN if zalo_row["role"] == "admin" else Role.USER,
-        zalo_row["status"] == "active",
+        role,
+        active,
+        user_row.get("rag_enabled", True) if hasattr(user_row, "get") else True,
+        paired,
     )
 
 
@@ -440,23 +519,36 @@ async def zalo_list_users() -> list[dict[str, object]]:
 
 
 async def zalo_lookup(external_id: str) -> User | None:
-    """Tra cứu user Zalo đã pair; trả None nếu chưa từng được owner pair."""
+    """Tra cứu hoặc tạo một Zalo user. Pairing chỉ nâng user lên bot mode."""
     db = await pool()
     row = await db.fetchrow(
         """
-        SELECT u.id::text AS id, u.channel, u.external_id, z.role, z.status
+        SELECT u.id::text AS id, u.channel, u.external_id, u.rag_enabled,
+               z.role AS zalo_role, z.status AS zalo_status, z.user_id AS paired_user_id
         FROM users u
-        JOIN zalo_users z ON z.user_id = u.id
+        LEFT JOIN zalo_users z ON z.user_id = u.id
         WHERE u.channel = 'zalo' AND u.external_id = $1
         """,
         external_id,
     )
     if row is None:
-        return None
-    await db.execute(
-        "UPDATE zalo_users SET last_active_at = NOW() WHERE user_id = $1::uuid", row["id"]
-    )
-    return _zalo_user_from_rows(row, row)
+        user_row = await db.fetchrow(
+            """
+            INSERT INTO users(channel, external_id, role) VALUES('zalo', $1, 'user')
+            ON CONFLICT(channel, external_id) DO UPDATE SET channel = users.channel
+            RETURNING id::text AS id, channel, external_id, rag_enabled
+            """,
+            external_id,
+        )
+        row = user_row
+        zalo_row = None
+    else:
+        zalo_row = row if row["paired_user_id"] is not None else None
+        if zalo_row is not None:
+            await db.execute(
+                "UPDATE zalo_users SET last_active_at = NOW() WHERE user_id = $1::uuid", row["id"]
+            )
+    return _zalo_user_from_rows(row, zalo_row)
 
 
 async def zalo_register_group(group_id: str) -> None:
@@ -548,6 +640,89 @@ async def zalo_admin_user() -> User | None:
     )
     return None if row is None else _zalo_user_from_rows(row, row)
 
+
+
+async def enqueue_zalo_message(recipient_id: str, content: str) -> int:
+    db = await pool()
+    return await db.fetchval(
+        "INSERT INTO zalo_outbox(recipient_id, content) VALUES($1, $2) RETURNING id",
+        recipient_id, content,
+    )
+
+
+ZALO_OUTBOX_MAX_ATTEMPTS = 8
+ZALO_OUTBOX_LEASE_SECONDS = 120
+
+
+async def claim_zalo_outbox(limit: int = 20) -> list[dict[str, object]]:
+    db = await pool()
+    async with db.acquire() as conn, conn.transaction():
+        rows = await conn.fetch(
+            """
+            WITH due AS (
+              SELECT id
+              FROM zalo_outbox
+              WHERE sent_at IS NULL
+                AND attempts < $1
+                AND next_attempt_at <= NOW()
+                AND (lease_until IS NULL OR lease_until < NOW())
+              ORDER BY id
+              LIMIT $2
+              FOR UPDATE SKIP LOCKED
+            )
+            UPDATE zalo_outbox o
+            SET attempts = o.attempts + 1,
+                lease_until = NOW() + make_interval(secs => $3),
+                lease_token = gen_random_uuid()
+            FROM due
+            WHERE o.id = due.id
+            RETURNING o.id, o.recipient_id, o.content, o.attempts, o.lease_token
+            """,
+            ZALO_OUTBOX_MAX_ATTEMPTS,
+            limit,
+            ZALO_OUTBOX_LEASE_SECONDS,
+        )
+        return [dict(row) for row in rows]
+
+
+async def mark_zalo_outbox_sent(message_id: int, lease_token: str) -> bool:
+    db = await pool()
+    result = await db.execute(
+        """
+        UPDATE zalo_outbox
+        SET sent_at = NOW(), lease_until = NULL, lease_token = NULL, last_error = NULL
+        WHERE id = $1 AND sent_at IS NULL AND lease_token = $2::uuid
+        """,
+        message_id,
+        lease_token,
+    )
+    return result.endswith("1")
+
+
+async def mark_zalo_outbox_failed(message_id: int, lease_token: str, error: str) -> bool:
+    db = await pool()
+    result = await db.execute(
+        """
+        UPDATE zalo_outbox
+        SET last_error = LEFT($3, 1000),
+            lease_until = NULL,
+            lease_token = NULL,
+            next_attempt_at = NOW() + CASE attempts
+              WHEN 1 THEN INTERVAL '5 seconds'
+              WHEN 2 THEN INTERVAL '10 seconds'
+              WHEN 3 THEN INTERVAL '20 seconds'
+              WHEN 4 THEN INTERVAL '40 seconds'
+              WHEN 5 THEN INTERVAL '80 seconds'
+              WHEN 6 THEN INTERVAL '160 seconds'
+              ELSE INTERVAL '300 seconds'
+            END
+        WHERE id = $1 AND sent_at IS NULL AND lease_token = $2::uuid
+        """,
+        message_id,
+        lease_token,
+        error,
+    )
+    return result.endswith("1")
 
 async def add_note(user_id: str, content: str) -> int:
     db = await pool()
@@ -761,6 +936,16 @@ async def is_holding(user_id: str, symbol: str) -> bool:
     return value is not None
 
 
+async def clear_history(user_id: str) -> None:
+    db = await pool()
+    await db.execute("DELETE FROM chat_messages WHERE user_id=$1::uuid", user_id)
+
+
+async def clear_memory(user_id: str) -> None:
+    db = await pool()
+    await db.execute("DELETE FROM user_memory WHERE user_id=$1::uuid", user_id)
+
+
 async def add_message(user_id: str, role: str, content: str) -> None:
     db = await pool()
     await db.execute(
@@ -780,6 +965,17 @@ async def history(user_id: str, turns: int) -> list[dict[str, str]]:
         turns * 2,
     )
     return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+
+
+async def set_memory(user_id: str, facts: list[dict[str, str]]) -> None:
+    db = await pool()
+    await db.execute(
+        """INSERT INTO user_memory(user_id, facts, updated_at)
+        VALUES($1::uuid, $2::jsonb, NOW())
+        ON CONFLICT(user_id) DO UPDATE SET facts = EXCLUDED.facts, updated_at = NOW()""",
+        user_id,
+        json.dumps(facts, ensure_ascii=False),
+    )
 
 
 async def memory(user_id: str) -> Sequence[str]:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+import os
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -30,24 +31,26 @@ class Settings:
     database_url: str = os.getenv("DATABASE_URL", "").strip()
     settings_enc_key: str = os.getenv("SETTINGS_ENC_KEY", "").strip()
     groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
-    # llama-3.3-70b-versatile bị Groq khai tử 16/08/2026 — gpt-oss-20b là model free nhanh
-    # nhất (LPU, ~1000 tok/s) phù hợp chat hàng ngày tần suất cao.
     groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
+    groq_realtime_model: str = os.getenv("GROQ_REALTIME_MODEL", "groq/compound-mini").strip()
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "").strip()
-    # nemotron-3-super free tier: 262K context, cân bằng tốc độ/chất lượng, đủ sâu cho
-    # deep_report (phân tích cổ phiếu/tổng kết nhóm) lẫn làm fallback chat thường.
     openrouter_model: str = os.getenv(
         "OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"
     ).strip()
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "").strip()
-    # gemini-2.5-flash sẽ bị Google khai tử 16/10/2026 — gemini-3.6-flash là bản Flash mới
-    # nhất còn free tier, vẫn hỗ trợ grounding (/gia, /vimo) và vision (ảnh→prompt).
     google_model: str = os.getenv("GOOGLE_MODEL", "gemini-3.6-flash").strip()
     ai_timeout_sec: int = _integer("AI_TIMEOUT_SEC", 45)
+    ai_max_concurrency: int = _integer("AI_MAX_CONCURRENCY", 3)
     chat_history_turns: int = _integer("CHAT_HISTORY_TURNS", 10)
     groq_max_concurrency: int = _integer("GROQ_MAX_CONCURRENCY", 8)
     openrouter_max_concurrency: int = _integer("OPENROUTER_MAX_CONCURRENCY", 4)
-    google_max_concurrency: int = _integer("GOOGLE_MAX_CONCURRENCY", 4)
+    google_max_concurrency: int = _integer("GOOGLE_MAX_CONCURRENCY", 2)
+    groq_realtime_max_concurrency: int = _integer("GROQ_REALTIME_MAX_CONCURRENCY", 2)
+    provider_circuit_breaker_failures: int = _integer("PROVIDER_CIRCUIT_BREAKER_FAILURES", 3)
+    provider_circuit_breaker_cooldown_sec: int = _integer("PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SEC", 30)
+    db_pool_min_size: int = _integer("DB_POOL_MIN_SIZE", 1)
+    db_pool_max_size: int = _integer("DB_POOL_MAX_SIZE", 5)
+    reindex_on_startup: bool = _boolean("REINDEX_ON_STARTUP")
     webhook_secret: str = os.getenv("WEBHOOK_SECRET", "").strip()
     webhook_base_url: str = os.getenv("WEBHOOK_BASE_URL", "").strip()
     bridge_secret: str = os.getenv("BRIDGE_SECRET", "").strip()
@@ -69,6 +72,11 @@ class Settings:
             required.update(
                 {"WEBHOOK_SECRET": self.webhook_secret, "WEBHOOK_BASE_URL": self.webhook_base_url}
             )
+            parsed_webhook = urlparse(self.webhook_base_url)
+            if parsed_webhook.scheme != "https" or not parsed_webhook.netloc:
+                raise RuntimeError("WEBHOOK_BASE_URL phải là URL HTTPS hợp lệ")
+            if len(self.webhook_secret) > 256:
+                raise RuntimeError("WEBHOOK_SECRET không được dài quá 256 ký tự")
         if self.zalo_enabled:
             required.update(
                 {"BRIDGE_SECRET": self.bridge_secret, "SETTINGS_ENC_KEY": self.settings_enc_key}
@@ -79,15 +87,23 @@ class Settings:
         ranges = {
             "TELEGRAM_OWNER_ID": (1, None, self.telegram_owner_id),
             "AI_TIMEOUT_SEC": (1, 300, self.ai_timeout_sec),
+            "AI_MAX_CONCURRENCY": (1, 16, self.ai_max_concurrency),
             "CHAT_HISTORY_TURNS": (1, 100, self.chat_history_turns),
             "GROQ_MAX_CONCURRENCY": (1, 64, self.groq_max_concurrency),
             "OPENROUTER_MAX_CONCURRENCY": (1, 64, self.openrouter_max_concurrency),
             "GOOGLE_MAX_CONCURRENCY": (1, 64, self.google_max_concurrency),
+            "GROQ_REALTIME_MAX_CONCURRENCY": (1, 16, self.groq_realtime_max_concurrency),
+            "PROVIDER_CIRCUIT_BREAKER_FAILURES": (1, 20, self.provider_circuit_breaker_failures),
+            "PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SEC": (1, 3600, self.provider_circuit_breaker_cooldown_sec),
+            "DB_POOL_MIN_SIZE": (1, 10, self.db_pool_min_size),
+            "DB_POOL_MAX_SIZE": (1, 20, self.db_pool_max_size),
             "STOCK_CACHE_TTL_SEC": (0, 3600, self.stock_cache_ttl_sec),
         }
         if self.zalo_enabled:
             ranges["ZALO_CONTROL_PORT"] = (1024, 65535, self.zalo_control_port)
             ranges["ZALO_DAILY_DIGEST_HOUR"] = (0, 23, self.zalo_daily_digest_hour)
+        if self.db_pool_min_size > self.db_pool_max_size:
+            raise RuntimeError("DB_POOL_MIN_SIZE không được lớn hơn DB_POOL_MAX_SIZE")
         invalid = [
             f"{name}={value} (phải trong khoảng {minimum}..{maximum})"
             for name, (minimum, maximum, value) in ranges.items()
