@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 from core.config import settings
 
-_TIMEOUT = httpx.Timeout(10.0)
+_TIMEOUT = httpx.Timeout(5.0)
+_RETRIES = 6
+_RETRY_DELAY_SEC = 2.0
 
 
 async def start_login() -> str:
@@ -16,13 +20,16 @@ async def start_login() -> str:
     if not settings.bridge_secret:
         return "Thiếu BRIDGE_SECRET, không thể gọi zalo-gateway."
     url = f"http://127.0.0.1:{settings.zalo_control_port}/login/start"
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.post(url, headers={"x-bridge-secret": settings.bridge_secret})
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        return (
-            "Không gọi được zalo-gateway (kiểm tra ZALO_ENABLED, tiến trình Node đã chạy "
-            f"chưa): {exc}"
-        )
-    return "Đã yêu cầu đăng nhập Zalo B — chờ mã QR gửi tới đây trong giây lát."
+    last_error: Exception | None = None
+    for attempt in range(1, _RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                response = await client.post(url, headers={"x-bridge-secret": settings.bridge_secret})
+            response.raise_for_status()
+            return "Đã yêu cầu đăng nhập Zalo B — chờ mã QR gửi tới đây trong giây lát."
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < _RETRIES:
+                await asyncio.sleep(_RETRY_DELAY_SEC)
+
+    return f"Không gọi được zalo-gateway sau {_RETRIES} lần thử (127.0.0.1:{settings.zalo_control_port}): {last_error}"
