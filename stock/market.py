@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -10,9 +11,14 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from stock.validation import ohlcv_contract_errors, validate_ohlcv
+
 logger = logging.getLogger(__name__)
 
 DNSE_BASE = "https://services.entrade.com.vn/chart-api/v2/ohlcs"
+DNSE_TICK_API = "https://api.dnse.com.vn/price-api/query"
+PRICE_SCALE = 1000
+REALTIME_CACHE_TTL_SEC = 5
 MIN_SESSIONS = 30
 CACHE_MAX_ENTRIES = 500
 DNSE_RETRY_ATTEMPTS = 2
@@ -20,12 +26,14 @@ DNSE_RETRY_BACKOFF_SEC = 0.6
 VNSTOCK_TIMEOUT_SEC = 20
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
-MARKET_CLOSE_HOUR = 15  # HOSE/HNX/UPCOM đóng cửa phiên chiều lúc 15:00 giờ VN
+MARKET_CLOSE_HOUR = 15
 
 _client: httpx.AsyncClient | None = None
 _cache: OrderedDict[tuple[str, int], tuple[float, Series]] = OrderedDict()
 _cache_locks: dict[tuple[str, int], asyncio.Lock] = {}
 _locks_guard = asyncio.Lock()
+_realtime_cache: dict[str, tuple[float, float]] = {}
+_realtime_locks: dict[str, asyncio.Lock] = {}
 
 
 @dataclass(frozen=True)
@@ -43,10 +51,112 @@ class Series:
         return self.closes[-1] if self.closes else 0.0
 
 
+@dataclass(frozen=True)
+class Quote:
+    symbol: str
+    price: float
+    prev_close: float
+    change: float
+    change_pct: float
+    date: str
+    is_realtime: bool
+
+
+def _is_index_symbol(symbol: str) -> bool:
+    return symbol.upper().replace("-", "").replace("^", "") in {
+        "VNINDEX", "VN30", "HNXINDEX", "HNX30", "UPCOMINDEX", "UPINDEX"
+    }
+
+
+def _market_hours_now() -> bool:
+    now = datetime.now(VN_TZ)
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 <= minutes <= 15 * 60
+
+
+async def _realtime_lock(symbol: str) -> asyncio.Lock:
+    async with _locks_guard:
+        lock = _realtime_locks.get(symbol)
+        if lock is None:
+            lock = asyncio.Lock()
+            _realtime_locks[symbol] = lock
+        return lock
+
+
+async def fetch_realtime_tick(symbol: str, ttl: int = REALTIME_CACHE_TTL_SEC) -> float | None:
+    """Lấy giá khớp gần nhất từ DNSE price-api; chỉ chấp nhận tick của hôm nay."""
+    symbol = symbol.upper().strip()
+    if _is_index_symbol(symbol) or not re.fullmatch(r"[A-Z0-9]{1,10}", symbol):
+        return None
+    cached = _realtime_cache.get(symbol)
+    if cached and time.monotonic() - cached[0] < ttl:
+        return cached[1]
+    lock = await _realtime_lock(symbol)
+    async with lock:
+        cached = _realtime_cache.get(symbol)
+        if cached and time.monotonic() - cached[0] < ttl:
+            return cached[1]
+        day_str = datetime.now(VN_TZ).strftime("%Y-%m-%d")
+        query = (
+            "query GetKrxTicksBySymbols {GetKrxTicksBySymbols("
+            f'symbols: "{symbol}", date: "{day_str}", limit: 1, board: 2'
+            ") {ticks {matchPrice}}}"
+        )
+        try:
+            response = await client().post(
+                DNSE_TICK_API,
+                json={"operationName": "GetKrxTicksBySymbols", "query": query},
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+            data = response.json()
+            ticks = ((data.get("data") or {}).get("GetKrxTicksBySymbols") or {}).get("ticks", [])
+            if ticks:
+                raw = ticks[0].get("matchPrice")
+                if raw is not None and float(raw) > 0:
+                    price = round(float(raw) * PRICE_SCALE)
+                    _realtime_cache[symbol] = (time.monotonic(), price)
+                    return price
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            logger.warning("DNSE realtime tick lỗi cho %s: %s", symbol, exc)
+        return None
+
+
+async def fetch_quote(symbol: str, ttl: int = REALTIME_CACHE_TTL_SEC) -> Quote:
+    """Quote ưu tiên tick realtime; trong giờ giao dịch không fallback về giá cũ."""
+    symbol = symbol.upper().strip()
+    series = await fetch(symbol, days=5, ttl=90)
+    if len(series.closes) < 1:
+        raise RuntimeError(f"Không có dữ liệu giá cho {symbol}")
+    tick = await fetch_realtime_tick(symbol, ttl=ttl)
+    today = datetime.now(VN_TZ).date().isoformat()
+    if tick is not None:
+        prev_close = (
+            series.closes[-2]
+            if len(series.closes) >= 2 and series.dates[-1] == today
+            else series.closes[-1]
+        )
+        price = tick
+        change = price - prev_close
+        change_pct = (change / prev_close) * 100 if prev_close else 0
+        return Quote(symbol, price, prev_close, change, change_pct, today, True)
+    if _market_hours_now():
+        raise RuntimeError(f"Nguồn realtime DNSE tạm thời không trả tick cho {symbol}; không dùng giá đóng cửa cũ thay thế")
+    prev_close = series.closes[-2] if len(series.closes) >= 2 else series.closes[-1]
+    price = series.closes[-1]
+    change = price - prev_close
+    change_pct = (change / prev_close) * 100 if prev_close else 0
+    return Quote(symbol, price, prev_close, change, change_pct, series.dates[-1], False)
+
 def client() -> httpx.AsyncClient:
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=10)
+        _client = httpx.AsyncClient(
+            timeout=10,
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+        )
     return _client
 
 
@@ -157,8 +267,6 @@ async def _fetch_from_dnse(symbol: str, days: int) -> Series:
 
 
 def _fetch_from_vnstock_sync(symbol: str, days: int) -> Series:
-    # Import cục bộ: vnstock kéo theo pandas/requests khá nặng, chỉ cần tải khi thật sự
-    # dùng tới nhánh dự phòng, không muốn ép mọi request stock đều load thư viện này.
     from vnstock import Vnstock
 
     end = datetime.now(VN_TZ).date()
@@ -210,18 +318,14 @@ async def _fetch_from_vnstock(symbol: str, days: int) -> Series:
 
 
 def validate(series: Series) -> None:
-    lengths = {
-        len(series.closes),
-        len(series.highs),
-        len(series.lows),
-        len(series.volumes),
-        len(series.dates),
-    }
-    if len(lengths) != 1 or not series.closes:
-        raise ValueError("OHLCV không đồng nhất")
-    for close, high, low in zip(series.closes, series.highs, series.lows, strict=True):
-        if close <= 0 or low <= 0 or high < low or not low <= close <= high:
-            raise ValueError("OHLCV vi phạm contract")
+    errors = ohlcv_contract_errors(
+        series.closes, series.highs, series.lows, series.volumes, series.dates
+    )
+    if errors:
+        raise ValueError("; ".join(errors))
+    quality = validate_ohlcv(series.closes, series.highs, series.lows, series.volumes, series.dates)
+    if not quality.usable:
+        raise ValueError("Dữ liệu OHLCV không đủ tin cậy: " + "; ".join(quality.reasons))
 
 
 def trim_open_session(series: Series) -> Series:
