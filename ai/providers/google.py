@@ -110,13 +110,26 @@ class GoogleProvider:
             except Exception as exc:
                 raise ProviderError(f"google: {type(exc).__name__}") from exc
 
-    async def grounded_search(self, prompt: str) -> AIResponse:
+    @staticmethod
+    def _has_grounding_metadata(response: Any) -> bool:
+        """Accept a response only when Gemini reports Google Search grounding metadata."""
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            metadata = getattr(candidate, "grounding_metadata", None)
+            if metadata is None:
+                continue
+            queries = getattr(metadata, "web_search_queries", None)
+            chunks = getattr(metadata, "grounding_chunks", None)
+            supports = getattr(metadata, "grounding_supports", None)
+            if queries or chunks or supports:
+                return True
+        return False
+
+    async def grounded_search(self, prompt: str, *, require_evidence: bool = True) -> AIResponse:
         if self.client is None:
             raise GroundingUnavailable("Google API chưa được cấu hình")
 
-        # Google Search grounding is supported by current Gemini Flash models.
-        # Keep a stable fallback because model availability/configuration can differ
-        # between API projects during model rollouts.
+        # Keep the configured model first, then stable fallbacks that support Search grounding.
         models = []
         for model in (self.model, "gemini-2.5-flash"):
             if model and model not in models:
@@ -139,7 +152,16 @@ class GoogleProvider:
                     if not text:
                         errors.append(f"{model}: empty response")
                         continue
-                    return AIResponse(text, "google", model, True, response)
+                    if require_evidence and not self._has_grounding_metadata(response):
+                        errors.append(f"{model}: không có grounding metadata")
+                        continue
+                    return AIResponse(
+                        text,
+                        "google",
+                        model,
+                        True,
+                        response,
+                    )
                 except Exception as exc:
                     error = f"{model}: {type(exc).__name__}: {exc}"
                     errors.append(error)
