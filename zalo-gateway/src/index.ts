@@ -375,22 +375,6 @@ async function main(): Promise<void> {
   let api: ZaloApi | null = null;
   let loginInFlight = false;
 
-  const saved = await fetchSavedSession().catch((error) => {
-    console.error("[zalo] không lấy được session đã lưu, sẽ chờ /zalologin", error);
-    return null;
-  });
-  if (saved) {
-    try {
-      api = await loginWithSession(saved);
-      console.log("[zalo] đăng nhập lại bằng session đã lưu — không cần quét QR");
-    } catch (error) {
-      console.error("[zalo] session đã lưu không dùng được nữa (có thể hết hạn)", error);
-      api = null;
-    }
-  } else {
-    console.log("[zalo] chưa có session nào — chờ lệnh /zalologin từ Telegram để sinh mã QR");
-  }
-
   const triggerLogin = () => {
     if (loginInFlight || api) return;
     loginInFlight = true;
@@ -410,6 +394,22 @@ async function main(): Promise<void> {
   };
 
   startControlServer(() => api, triggerLogin);
+
+  const saved = await fetchSavedSession().catch((error) => {
+    console.error("[zalo] không lấy được session đã lưu, sẽ chờ /zalologin", error);
+    return null;
+  });
+  if (saved) {
+    try {
+      api = await loginWithSession(saved);
+      console.log("[zalo] đăng nhập lại bằng session đã lưu — không cần quét QR");
+    } catch (error) {
+      console.error("[zalo] session đã lưu không dùng được nữa (có thể hết hạn)", error);
+      api = null;
+    }
+  } else {
+    console.log("[zalo] chưa có session nào — chờ lệnh /zalologin từ Telegram để sinh mã QR");
+  }
 }
 
 void main();
