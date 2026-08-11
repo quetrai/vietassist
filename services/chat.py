@@ -6,7 +6,9 @@ from core import database, knowledge
 from core.config import settings
 from core.models import User
 from services.locks import user_lock
+from services.concurrency import assistant_turn
 from services.prompt_engine import build_text_prompt_instruction
+from services import memory, tools
 
 SYSTEM_PROMPT = """Bạn là VietAssist, trợ lý AI tiếng Việt rõ ràng và thực tế.
 Không bịa dữ liệu hiện hành. Nếu thiếu dữ liệu, nói rõ giới hạn.
@@ -55,7 +57,7 @@ def _is_realtime_request(text: str) -> bool:
     if any(marker in normalized for marker in _REALTIME_MARKERS):
         return True
 
-    # Natural-language product/market price queries without explicit "hôm nay".
+    
     price_words = ("giá ", "giá của ", "bao nhiêu tiền", "giá bán")
     product_words = ("samsung", "iphone", "xiaomi", "oppo", "laptop", "điện thoại", "macbook")
     return any(w in normalized for w in price_words) and any(w in normalized for w in product_words)
@@ -80,31 +82,39 @@ async def chat(user: User, text: str) -> tuple[str, str]:
 
     lock = await user_lock(user.id)
     async with lock:
-        # Mọi yêu cầu cần dữ liệu hiện hành đều phải qua realtime web search.
-        # Không fallback sang LLM chat thường vì đó có thể là dữ liệu cũ.
-        if _is_realtime_request(text):
-            try:
-                response = await router.macro_news(text)
-            except ProviderError:
-                response = await router.product_search(text) if any(
-                    word in text.casefold() for word in ("giá ", "giá của ", "giá bán", "bao nhiêu tiền")
-                ) else None
-                if response is None:
-                    return (
-                        "Không tìm thấy dữ liệu thời gian thực đã được xác minh lúc này. "
-                        "Tôi không có đủ kết quả web để trả lời mà không bịa thông tin.",
-                        "realtime-unavailable",
-                    )
-        else:
-            history = await database.history(user.id, settings.chat_history_turns)
-            messages = [*history, {"role": "user", "content": text}]
-            system = await _system_with_knowledge(text, rag_enabled=user.rag_enabled)
-            response = await router.text(TaskType.CHAT, messages, system=system)
+        async with assistant_turn(settings.ai_max_concurrency):
+            tool_result = await tools.maybe_run(user.id, text)
+            if tool_result.handled:
+                await database.add_message(user.id, "user", text)
+                await database.add_message(user.id, "assistant", tool_result.text)
+                return tool_result.text, "tool"
 
-        await database.add_message(user.id, "user", text)
-        await database.add_message(user.id, "assistant", response.text)
-        return response.text, response.provider
+            if _is_realtime_request(text):
+                try:
+                    response = await router.macro_news(text)
+                except ProviderError:
+                    response = await router.product_search(text) if any(
+                        word in text.casefold() for word in ("giá ", "giá của ", "giá bán", "bao nhiêu tiền")
+                    ) else None
+                    if response is None:
+                        return (
+                            "Không tìm thấy dữ liệu thời gian thực đã được xác minh lúc này. "
+                            "Tôi không có đủ kết quả web để trả lời mà không bịa thông tin.",
+                            "realtime-unavailable",
+                        )
+            else:
+                history = await database.history(user.id, settings.chat_history_turns)
+                messages = [*history, {"role": "user", "content": text}]
+                system = await _system_with_knowledge(text, rag_enabled=user.rag_enabled)
+                memory_context = await memory.build_context(user.id)
+                if memory_context:
+                    system = f"{system}\n\n{memory_context}"
+                response = await router.text(TaskType.CHAT, messages, system=system)
 
+            await database.add_message(user.id, "user", text)
+            await database.add_message(user.id, "assistant", response.text)
+            memory.schedule_update(user.id, text, response.text)
+            return response.text, response.provider
 
 async def generate_text_prompt(request: str) -> tuple[str, str, str]:
     instruction, spec = build_text_prompt_instruction(request)

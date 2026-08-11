@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from channels.zalo import summarize_group
 from core import database
 from core.config import settings
-from services.zalo_push import send_message
+from services.zalo_push import enqueue_message
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,8 @@ async def run_daily_digest() -> int:
             continue
         if summary == _NO_MESSAGES:
             continue
-        ok = await send_message(admin.external_id, f"📊 Tổng kết nhóm {label} (24h)\n\n{summary}")
-        sent += int(ok)
+        await enqueue_message(admin.external_id, f"📊 Tổng kết nhóm {label} (24h)\n\n{summary}")
+        sent += 1
     return sent
 
 

@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 from core import database
 from stock.analysis import normalize_symbol
-from stock.market import fetch
+from stock.market import fetch_quote
 
 _GROUPED = re.compile(r"^\d{1,3}(?:[.,]\d{3})+$")
 _DECIMAL = re.compile(r"^\d+[.,]\d+$")
@@ -117,10 +117,10 @@ async def list_portfolio(user_id: str) -> str:
 
 async def _current_price(symbol: str) -> Decimal | None:
     try:
-        series = await fetch(symbol)
+        quote = await fetch_quote(symbol)
     except (ValueError, RuntimeError):
         return None
-    return _as_decimal(series.price)
+    return _as_decimal(quote.price)
 
 
 def _format_holding_line(
