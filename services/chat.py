@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+
 from ai import router
 from ai.contracts import ProviderError, TaskType
 from core import database, knowledge
 from core.config import settings
 from core.models import User
+from services import memory
+from services.intent_router import maybe_run_tool
 from services.locks import user_lock
-from services.concurrency import assistant_turn
 from services.prompt_engine import build_text_prompt_instruction
-from services import memory, tools
 
 SYSTEM_PROMPT = """Bạn là VietAssist, trợ lý AI tiếng Việt rõ ràng và thực tế.
 Không bịa dữ liệu hiện hành. Nếu thiếu dữ liệu, nói rõ giới hạn.
@@ -57,20 +59,23 @@ def _is_realtime_request(text: str) -> bool:
     if any(marker in normalized for marker in _REALTIME_MARKERS):
         return True
 
-    
+    # Natural-language product/market price queries without explicit "hôm nay".
     price_words = ("giá ", "giá của ", "bao nhiêu tiền", "giá bán")
     product_words = ("samsung", "iphone", "xiaomi", "oppo", "laptop", "điện thoại", "macbook")
     return any(w in normalized for w in price_words) and any(w in normalized for w in product_words)
 
 
-async def _system_with_knowledge(query: str, *, rag_enabled: bool) -> str:
+async def _system_with_knowledge(query: str, *, rag_enabled: bool, memory_context: str = "") -> str:
+    system = SYSTEM_PROMPT
+    if memory_context:
+        system = f"{system}\n\n{memory_context}"
     if not rag_enabled:
-        return SYSTEM_PROMPT
+        return system
     context = await knowledge.retrieve(query)
     if not context:
-        return SYSTEM_PROMPT
+        return system
     return (
-        f"{SYSTEM_PROMPT}\n\n"
+        f"{system}\n\n"
         "Dữ liệu tham khảo liên quan nhất tới câu hỏi (trích từ knowledge base do người vận "
         "hành cung cấp) — ưu tiên dùng khi liên quan, không bịa thêm ngoài phạm vi này:\n" + context
     )
@@ -82,39 +87,45 @@ async def chat(user: User, text: str) -> tuple[str, str]:
 
     lock = await user_lock(user.id)
     async with lock:
-        async with assistant_turn(settings.ai_max_concurrency):
-            tool_result = await tools.maybe_run(user.id, text)
-            if tool_result.handled:
-                await database.add_message(user.id, "user", text)
-                await database.add_message(user.id, "assistant", tool_result.text)
-                return tool_result.text, "tool"
+        # Mọi yêu cầu cần dữ liệu hiện hành đều phải qua realtime web search.
+        # Không fallback sang LLM chat thường vì đó có thể là dữ liệu cũ.
+        if _is_realtime_request(text):
+            try:
+                response = await router.macro_news(text)
+            except ProviderError:
+                response = await router.product_search(text) if any(
+                    word in text.casefold() for word in ("giá ", "giá của ", "giá bán", "bao nhiêu tiền")
+                ) else None
+                if response is None:
+                    return (
+                        "Không tìm thấy dữ liệu thời gian thực đã được xác minh lúc này. "
+                        "Tôi không có đủ kết quả web để trả lời mà không bịa thông tin.",
+                        "realtime-unavailable",
+                    )
+        else:
+            # Định tuyến ý định ghi chú/nhắc nhở bằng ngôn ngữ tự nhiên (vd "ghi chú
+            # giúp anh...", "8 giờ tối nhắc anh gọi mẹ") — xem services/intent_router.py.
+            # KHÔNG áp dụng cho nhánh realtime ở trên (không có ý nghĩa) hay các lệnh
+            # "/..." (đã tường minh, xử lý riêng ở services/commands.py). Trả None êm
+            # nếu không khớp/lỗi -> rơi xuống chat bình thường ngay dưới đây.
+            tool_reply = await maybe_run_tool(user, text)
+            if tool_reply is not None:
+                return tool_reply, "tool"
 
-            if _is_realtime_request(text):
-                try:
-                    response = await router.macro_news(text)
-                except ProviderError:
-                    response = await router.product_search(text) if any(
-                        word in text.casefold() for word in ("giá ", "giá của ", "giá bán", "bao nhiêu tiền")
-                    ) else None
-                    if response is None:
-                        return (
-                            "Không tìm thấy dữ liệu thời gian thực đã được xác minh lúc này. "
-                            "Tôi không có đủ kết quả web để trả lời mà không bịa thông tin.",
-                            "realtime-unavailable",
-                        )
-            else:
-                history = await database.history(user.id, settings.chat_history_turns)
-                messages = [*history, {"role": "user", "content": text}]
-                system = await _system_with_knowledge(text, rag_enabled=user.rag_enabled)
-                memory_context = await memory.build_context(user.id)
-                if memory_context:
-                    system = f"{system}\n\n{memory_context}"
-                response = await router.text(TaskType.CHAT, messages, system=system)
+            history = await database.history(user.id, settings.chat_history_turns)
+            messages = [*history, {"role": "user", "content": text}]
+            memory_context = await memory.build_memory_context(user.id)
+            system = await _system_with_knowledge(text, rag_enabled=user.rag_enabled, memory_context=memory_context)
+            response = await router.text(TaskType.CHAT, messages, system=system)
 
-            await database.add_message(user.id, "user", text)
-            await database.add_message(user.id, "assistant", response.text)
-            memory.schedule_update(user.id, text, response.text)
-            return response.text, response.provider
+        await database.add_message(user.id, "user", text)
+        await database.add_message(user.id, "assistant", response.text)
+        # Trích xuất trí nhớ dài hạn chạy NGẦM, không await trong luồng trả lời cho
+        # người dùng — xem services/memory.py. Không bao giờ raise, an toàn để "fire
+        # and forget"; lỗi provider/JSON chỉ bị bỏ qua lượt đó, không ảnh hưởng chat.
+        asyncio.create_task(memory.update_memory(user.id, text, response.text))
+        return response.text, response.provider
+
 
 async def generate_text_prompt(request: str) -> tuple[str, str, str]:
     instruction, spec = build_text_prompt_instruction(request)

@@ -6,16 +6,12 @@ from dataclasses import dataclass
 from ai import router
 from ai.contracts import GroundingUnavailable, ProviderError
 from core import database
-from core.config import settings
 from core.models import User
-from services import portfolio, reminders
-from services.concurrency import assistant_turn
+from services import portfolio, reminders, translate as translate_service
 from services.chat import text_to_prompt
 from services.prompt_engine import prompt_spec
 from stock import analyze_symbol, quick_quote
-from stock.fundamentals import build_fundamentals_prompt_section, fetch_fundamentals
 from stock.analysis import normalize_symbol
-from stock.sector import ALL_KNOWN_SYMBOLS
 
 Handler = Callable[[User, str], Awaitable[str]]
 
@@ -30,13 +26,10 @@ async def try_ticker_quote(text: str) -> str | None:
     candidate = text.strip()
     if len(candidate) != 3 or not candidate.isalpha() or not candidate.isascii():
         return None
-    symbol = candidate.upper()
-    if symbol not in ALL_KNOWN_SYMBOLS:
-        return None
     try:
         return await quick_quote(candidate)
-    except (ValueError, RuntimeError) as exc:
-        return f"Không lấy được giá {symbol}: {exc}"
+    except (ValueError, RuntimeError):
+        return None
 
 
 async def _cmd_gia(user: User, argument: str) -> str:
@@ -62,25 +55,26 @@ async def _cmd_prompt(user: User, argument: str) -> str:
         return "Không tạo được prompt lúc này (provider AI đang lỗi hoặc hết hạn mức), thử lại sau."
 
 
-async def _cmd_fundamental(user: User, argument: str) -> str:
-    if not argument:
-        return "Cú pháp: /fundamental <MÃ>"
-    symbol = normalize_symbol(argument.split()[0])
-    data = await fetch_fundamentals(symbol)
-    result = build_fundamentals_prompt_section(
-        data.valuation,
-        data.foreign,
-        symbol,
-        data.foreign_trend,
-        data.growth,
-        data.events,
-        data.sector_pe_avg,
-        data.sector_pe_sample,
-        data.sector_pe_label,
-        data.sector_profile,
-        data.sector_benchmark,
-    )
-    return result or f"{symbol}: chưa có đủ dữ liệu cơ bản đã xác minh."
+async def _cmd_dich(user: User, argument: str) -> str:
+    if not argument.strip():
+        return (
+            "Cú pháp: /dich [ja>vi|vi>ja] <nội dung>\n"
+            "Không chỉ định chiều thì tự nhận diện theo chữ Nhật trong câu.\n"
+            "Ví dụ: /dich お世話になります。確認お願いします。"
+        )
+    first_token, _, rest = argument.partition(" ")
+    direction = translate_service.parse_explicit_direction(first_token)
+    text = rest if direction else argument
+    if not text.strip():
+        return "Cú pháp: /dich [ja>vi|vi>ja] <nội dung>"
+    try:
+        result, _, resolved = await translate_service.translate(text, direction)
+    except ValueError as exc:
+        return f"Cú pháp: /dich [ja>vi|vi>ja] <nội dung>\n({exc})"
+    except ProviderError:
+        return "Không dịch được lúc này (provider AI đang lỗi hoặc hết hạn mức), thử lại sau."
+    label = translate_service.direction_label(resolved)
+    return f"🇯🇵↔🇻🇳 {label}\n\n{result}"
 
 
 async def _cmd_stock(user: User, argument: str) -> str:
@@ -121,6 +115,10 @@ async def _cmd_quote(user: User, argument: str) -> str:
 
 
 async def _cmd_ghichu(user: User, argument: str) -> str:
+    # Không gõ nội dung -> xem như muốn xem danh sách, đỡ phải nhớ thêm lệnh
+    # /dsghichu riêng. /dsghichu vẫn giữ nguyên (alias) cho ai đã quen gõ nó.
+    if not argument.strip():
+        return await reminders.list_notes(user.id)
     return await reminders.add_note(user.id, argument)
 
 
@@ -133,6 +131,10 @@ async def _cmd_xoaghichu(user: User, argument: str) -> str:
 
 
 async def _cmd_nhac(user: User, argument: str) -> str:
+    # Không gõ gì -> xem danh sách nhắc nhở, cùng nguyên tắc với /ghichu.
+    # /dsnhac vẫn giữ nguyên (alias) cho ai đã quen gõ nó.
+    if not argument.strip():
+        return await reminders.list_reminders(user.id)
     spec, _, content = argument.partition(" ")
     return await reminders.add_reminder(user.id, spec, content)
 
@@ -165,41 +167,15 @@ async def _cmd_xoadanhmuc(user: User, argument: str) -> str:
     return await portfolio.remove(user.id, argument.split()[0])
 
 
+async def _cmd_muctieu(user: User, argument: str) -> str:
+    parts = argument.split()
+    if len(parts) < 3:
+        return "Cú pháp: /muctieu <MÃ> <giá stop hoặc -> <giá target hoặc ->"
+    return await portfolio.set_alerts(user.id, parts[0], parts[1], parts[2])
+
+
 async def _cmd_danhmuc(user: User, argument: str) -> str:
     return await portfolio.list_portfolio(user.id)
-
-
-async def _cmd_reset(user: User, argument: str) -> str:
-    await database.clear_history(user.id)
-    return "Đã xóa ngữ cảnh chat hiện tại."
-
-
-async def _cmd_memory(user: User, argument: str) -> str:
-    facts = await database.memory(user.id)
-    items = [item for item in facts if isinstance(item, dict) and item.get("key") and item.get("value")]
-    if not items:
-        return "Chưa có thông tin dài hạn nào được lưu."
-    return "Trí nhớ dài hạn:\n" + "\n".join(f"- {item['key']}: {item['value']}" for item in items)
-
-
-async def _cmd_forget(user: User, argument: str) -> str:
-    await database.clear_memory(user.id)
-    return "Đã xóa toàn bộ trí nhớ dài hạn."
-
-
-async def _cmd_status(user: User, argument: str) -> str:
-    health = router.health_snapshot()
-    lines = ["Provider status:"]
-    for name, values in health.items():
-        state = "OPEN" if values["state"] == "open" else "OK"
-        lines.append(
-            f"- {name}: {values['ok']} OK / {values['errors']} lỗi / {state}"
-        )
-    return "\n".join(lines)
-
-async def _cmd_help(user: User, argument: str) -> str:
-    lines = ["📖 VietAssist — trợ lý AI", "", "💬 Chat: chỉ cần gửi tin nhắn bình thường.", "📊 /quote <MÃ> — giá cổ phiếu realtime khi thị trường đang giao dịch.", "📈 /stock <MÃ> [sâu] — phân tích cổ phiếu.", "🌐 /vimo <câu hỏi> — tin tức/vĩ mô.", "💰 /gia <sản phẩm> — tìm giá sản phẩm.", "🖼️ /prompt <mô tả> — tạo prompt ảnh.", "📁 /danhmuc — xem danh mục; /muavao và /banra để cập nhật.", "📝 /ghichu, /dsghichu, /xoaghichu — quản lý ghi chú.", "⏰ /nhac, /dsnhac, /xoanhac — quản lý nhắc nhở.", "🧠 /rag on|off — bật/tắt Knowledge Base.", "⚙️ /status — trạng thái provider.", "🔐 /zalologin — đăng nhập Zalo B.", "", "💡 Gõ đúng mã 3 chữ cái như FPT để tra nhanh giá realtime."]
-    return "\n".join(lines)
 
 
 async def _cmd_rag(user: User, argument: str) -> str:
@@ -215,26 +191,33 @@ async def _cmd_rag(user: User, argument: str) -> str:
 
 
 COMMANDS: dict[str, Command] = {
-    "/help": Command(_cmd_help, "/help — xem hướng dẫn"),
-    "/status": Command(_cmd_status, "/status — trạng thái provider"),
-    "/reset": Command(_cmd_reset, "/reset — xóa ngữ cảnh chat"),
-    "/memory": Command(_cmd_memory, "/memory — xem trí nhớ dài hạn"),
-    "/forget": Command(_cmd_forget, "/forget — xóa trí nhớ dài hạn"),
     "/gia": Command(_cmd_gia, "/gia <sản phẩm> — tra giá bán hiện tại"),
     "/prompt": Command(_cmd_prompt, "/prompt <mô tả ảnh> — viết prompt tạo ảnh"),
     "/stock": Command(_cmd_stock, "/stock <MÃ> [sâu] — phân tích cổ phiếu"),
-    "/fundamental": Command(_cmd_fundamental, "/fundamental <MÃ> — định giá, tăng trưởng, dòng tiền và sự kiện"),
     "/vimo": Command(_cmd_vimo, "/vimo <câu hỏi> — tin tức/vĩ mô thị trường"),
+    "/dich": Command(
+        _cmd_dich,
+        "/dich [ja>vi|vi>ja] <nội dung> — dịch chat công việc Nhật-Việt (KIV), "
+        "không chỉ định chiều thì tự nhận diện",
+    ),
     "/quote": Command(_cmd_quote, "/quote <MÃ> — tra nhanh giá (hoặc gõ đúng 3 chữ cái)"),
-    "/ghichu": Command(_cmd_ghichu, "/ghichu <nội dung> — lưu ghi chú"),
-    "/dsghichu": Command(_cmd_dsghichu, "/dsghichu — danh sách ghi chú"),
+    "/ghichu": Command(
+        _cmd_ghichu, "/ghichu [nội dung] — có nội dung: lưu ghi chú; để trống: xem danh sách"
+    ),
+    "/dsghichu": Command(_cmd_dsghichu, "/dsghichu — xem danh sách ghi chú (giống /ghichu để trống)"),
     "/xoaghichu": Command(_cmd_xoaghichu, "/xoaghichu <id> — xoá ghi chú"),
-    "/nhac": Command(_cmd_nhac, "/nhac <30p|2h|1ngay|HH:MM> <nội dung> — đặt nhắc nhở"),
-    "/dsnhac": Command(_cmd_dsnhac, "/dsnhac — danh sách nhắc nhở"),
+    "/nhac": Command(
+        _cmd_nhac,
+        "/nhac [30p|2h|1ngay|HH:MM] [nội dung] — có nội dung: đặt nhắc nhở; để trống: xem danh sách",
+    ),
+    "/dsnhac": Command(_cmd_dsnhac, "/dsnhac — xem danh sách nhắc nhở (giống /nhac để trống)"),
     "/xoanhac": Command(_cmd_xoanhac, "/xoanhac <id> — xoá nhắc nhở"),
     "/muavao": Command(_cmd_muavao, "/muavao <MÃ> <KL> <giá> — ghi nhận mua vào danh mục"),
     "/banra": Command(_cmd_banra, "/banra <MÃ> <KL> — ghi nhận bán ra"),
     "/xoadanhmuc": Command(_cmd_xoadanhmuc, "/xoadanhmuc <MÃ> — xoá khỏi danh mục"),
+    "/muctieu": Command(
+        _cmd_muctieu, "/muctieu <MÃ> <giá stop hoặc -> <giá target hoặc -> — đặt mức tham khảo"
+    ),
     "/danhmuc": Command(_cmd_danhmuc, "/danhmuc — xem danh mục"),
     "/rag": Command(_cmd_rag, "/rag [on|off] — bật/tắt tra cứu knowledge base cho chat"),
 }
@@ -245,5 +228,4 @@ async def handle(user: User, text: str) -> str | None:
     entry = COMMANDS.get(command.lower())
     if entry is None:
         return None
-    async with assistant_turn(settings.ai_max_concurrency):
-        return await entry.handler(user, argument)
+    return await entry.handler(user, argument)

@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 from core import database
 from stock.analysis import normalize_symbol
-from stock.market import fetch_quote
+from stock.market import current_price as _market_current_price
 
 _GROUPED = re.compile(r"^\d{1,3}(?:[.,]\d{3})+$")
 _DECIMAL = re.compile(r"^\d+[.,]\d+$")
@@ -81,23 +81,53 @@ async def remove(user_id: str, symbol_raw: str) -> str:
     return f"Đã xóa {symbol} khỏi danh mục." if found else f"Không có {symbol} trong danh mục."
 
 
+async def set_alerts(user_id: str, symbol_raw: str, stop_raw: str, target_raw: str) -> str:
+    """Đặt/xoá mức giá stop-loss/chốt lời THAM KHẢO cho 1 mã đang giữ. Dùng "-" cho
+    stop hoặc target để xoá riêng mức đó (giữ nguyên mức còn lại).
+
+    ⚠️ CHỈ lưu để hiển thị lại trong /danhmuc — KHÔNG có cơ chế tự động kiểm tra giá
+    theo chu kỳ và bắn cảnh báo khi chạm mức (cần thêm 1 vòng lặp nền kiểu
+    reminder_loop, xem services/reminders.py, chưa được xây — nếu cần alert chủ động,
+    dùng /nhac để tự đặt nhắc nhở kiểm tra giá theo giờ mong muốn)."""
+    try:
+        symbol = normalize_symbol(symbol_raw)
+    except ValueError as exc:
+        return str(exc)
+    stop = None if stop_raw.strip() == "-" else _parse_positive_number(stop_raw)
+    target = None if target_raw.strip() == "-" else _parse_positive_number(target_raw)
+    if (stop is None and stop_raw.strip() != "-") or (target is None and target_raw.strip() != "-"):
+        return "Cú pháp: /muctieu <MÃ> <giá stop hoặc -> <giá target hoặc ->, giá phải lớn hơn 0."
+    found = await database.set_holding_alerts(user_id, symbol, stop, target)
+    if not found:
+        return f"Không có {symbol} trong danh mục. Dùng /muavao trước."
+    stop_text = f"{_vn(stop)}đ" if stop else "chưa đặt"
+    target_text = f"{_vn(target)}đ" if target else "chưa đặt"
+    return f"Đã cập nhật {symbol}: stop {stop_text}, target {target_text}."
+
+
 async def list_portfolio(user_id: str) -> str:
     rows = await database.list_holdings(user_id)
     if not rows:
         return "Danh mục trống. Dùng /muavao <MÃ> <khối lượng> <giá> để thêm."
 
     holdings = [
-        (str(row["symbol"]), _as_decimal(row["quantity"]), _as_decimal(row["average_price"]))
+        (
+            str(row["symbol"]),
+            _as_decimal(row["quantity"]),
+            _as_decimal(row["average_price"]),
+            _as_decimal(row["stop_price"]) if row.get("stop_price") is not None else None,
+            _as_decimal(row["target_price"]) if row.get("target_price") is not None else None,
+        )
         for row in rows
     ]
-    prices = await asyncio.gather(*(_current_price(symbol) for symbol, _, _ in holdings))
+    prices = await asyncio.gather(*(_current_price(symbol) for symbol, *_ in holdings))
 
     lines: list[str] = []
     priced_cost = Decimal(0)
     priced_value = Decimal(0)
     unpriced = 0
-    for (symbol, qty, avg), price in zip(holdings, prices, strict=True):
-        lines.append(_format_holding_line(symbol, qty, avg, price))
+    for (symbol, qty, avg, stop, target), price in zip(holdings, prices, strict=True):
+        lines.append(_format_holding_line(symbol, qty, avg, price, stop, target))
         if price is None:
             unpriced += 1
             continue
@@ -117,18 +147,31 @@ async def list_portfolio(user_id: str) -> str:
 
 async def _current_price(symbol: str) -> Decimal | None:
     try:
-        quote = await fetch_quote(symbol)
+        price, _is_realtime = await _market_current_price(symbol)
     except (ValueError, RuntimeError):
         return None
-    return _as_decimal(quote.price)
+    return _as_decimal(price) if price else None
 
 
 def _format_holding_line(
-    symbol: str, qty: Decimal, avg: Decimal, price: Decimal | None = None
+    symbol: str,
+    qty: Decimal,
+    avg: Decimal,
+    price: Decimal | None = None,
+    stop: Decimal | None = None,
+    target: Decimal | None = None,
 ) -> str:
     if price is None:
         return f"{symbol}: {_vn(qty)} CP @ vốn {_vn(avg)}đ — không lấy được giá hiện tại"
     pnl_pct = (price / avg - 1) * 100
-    return (
-        f"{symbol}: {_vn(qty)} CP @ vốn {_vn(avg)}đ, giá hiện tại {_vn(price)}đ ({pnl_pct:+.2f}%)"
-    )
+    line = f"{symbol}: {_vn(qty)} CP @ vốn {_vn(avg)}đ, giá hiện tại {_vn(price)}đ ({pnl_pct:+.2f}%)"
+    if stop is None and target is None:
+        return line
+    parts = []
+    if stop is not None:
+        marker = " ⚠️ đã chạm/dưới stop" if price <= stop else ""
+        parts.append(f"stop {_vn(stop)}đ{marker}")
+    if target is not None:
+        marker = " 🎯 đã chạm/vượt target" if price >= target else ""
+        parts.append(f"target {_vn(target)}đ{marker}")
+    return f"{line} — " + ", ".join(parts)
