@@ -109,7 +109,10 @@ async def _access_token() -> str:
         return token
 
 
-async def send_message(to_jid: str, text: str) -> None:
+_MAX_MESSAGE_CHARS = 4096  # Gioi han cua Zoom Team Chat cho 1 tin nhan (docs Zoom).
+
+
+async def _post_message(to_jid: str, text: str) -> None:
     token = await _access_token()
     body = {
         "robot_jid": settings.zoom_bot_jid,
@@ -121,7 +124,23 @@ async def send_message(to_jid: str, text: str) -> None:
         response = await client.post(
             _MESSAGE_URL, json=body, headers={"Authorization": f"Bearer {token}"}
         )
+    if response.status_code >= 400:
+        # Log ro noi dung Zoom tra ve (vi du "text too long", sai to_jid...) thay vi de
+        # raise_for_status() nuot mat ly do that su - giup chan doan nhanh hon.
+        logger.error(
+            "Zoom send message failed (%s) to_jid=%s: %s",
+            response.status_code,
+            to_jid,
+            response.text,
+        )
     response.raise_for_status()
+
+
+async def send_message(to_jid: str, text: str) -> None:
+    # Zoom Team Chat tu choi (400) neu 1 tin nhan vuot qua 4096 ky tu. Cat nho thanh
+    # nhieu tin thay vi gui nguyen mot khoi dai (vi du cau tra loi AI dai).
+    for i in range(0, len(text), _MAX_MESSAGE_CHARS):
+        await _post_message(to_jid, text[i : i + _MAX_MESSAGE_CHARS])
 
 
 def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
