@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import time
@@ -33,17 +34,49 @@ class ZoomEvent:
 
 
 def verify_webhook_token(authorization_header: str) -> bool:
-    """Xác thực webhook Zoom gửi tới bằng Verification Token cấu hình trên Marketplace
-    (header Authorization == ZOOM_VERIFICATION_TOKEN nguyên văn — cơ chế xác thực của app
-    kiểu 'General App + Chatbot' như quickstart zoom/chatbot-nodejs-quickstart dùng, KHÔNG
-    có tiền tố "Bearer "). Nếu Marketplace app của bạn dùng Event Subscription kiểu mới hơn
-    (chữ ký HMAC qua header x-zm-signature/x-zm-request-timestamp với 1 Secret Token riêng,
-    kèm bước xác thực challenge-response endpoint.url_validation) thì hàm này CẦN được thay
-    bằng xác thực chữ ký tương ứng — kiểm tra lại phần Feature > Chatbot trên Marketplace app
-    của bạn xem đang dùng cơ chế nào trước khi bật ZOOM_ENABLED=true trên production."""
+    """Xác thực webhook Zoom gửi tới bằng Verification Token CU (header Authorization ==
+    ZOOM_VERIFICATION_TOKEN nguyen van, KHONG co tien to "Bearer "). Chi dung cho app kieu
+    'General App + Chatbot' doi cu. App tao moi tren Marketplace (muc Access > Token >
+    Secret Token, di cung Event Subscriptions) PHAI dung verify_webhook_signature() ben
+    duoi thay vi ham nay."""
     if not settings.zoom_verification_token:
         return False
     return hmac.compare_digest(authorization_header, settings.zoom_verification_token)
+
+
+def verify_webhook_signature(
+    signature_header: str, timestamp_header: str, raw_body: bytes
+) -> bool:
+    """Xac thuc webhook Zoom bang chu ky HMAC-SHA256 (co che Secret Token + Event
+    Subscriptions hien hanh tren Marketplace). Zoom ky message dang
+    "v0:{timestamp}:{raw_body}" bang Secret Token, gui kem header:
+      - x-zm-request-timestamp: timestamp dung de ky
+      - x-zm-signature: "v0=" + hex digest
+    Xem: https://developers.zoom.us/docs/api/webhooks/#verify-webhook-events"""
+    if not settings.zoom_secret_token or not signature_header or not timestamp_header:
+        return False
+    message = f"v0:{timestamp_header}:{raw_body.decode('utf-8')}"
+    computed_hash = hmac.new(
+        settings.zoom_secret_token.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    expected_signature = f"v0={computed_hash}"
+    return hmac.compare_digest(signature_header, expected_signature)
+
+
+def build_url_validation_response(plain_token: str) -> dict:
+    """Xay phan hoi cho buoc xac thuc challenge-response khi ban bam Validate tren
+    Marketplace (event 'endpoint.url_validation'). Zoom POST payload chua plainToken,
+    app phai tra lai {"plainToken": ..., "encryptedToken": HMAC-SHA256(plainToken)}
+    ky bang Secret Token - KHONG can verify chu ky o buoc nay vi day la buoc thiet lap.
+    Xem: https://developers.zoom.us/docs/api/webhooks/#validate-your-webhook-endpoint"""
+    encrypted_token = hmac.new(
+        settings.zoom_secret_token.encode("utf-8"),
+        plain_token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {"plainToken": plain_token, "encryptedToken": encrypted_token}
 
 
 async def _fetch_access_token() -> tuple[str, int]:
