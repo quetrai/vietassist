@@ -31,6 +31,19 @@ class ZoomEvent:
     text: str
     to_jid: str
     channel_name: str = ""
+    account_id: str = ""
+
+    @property
+    def reply_jid(self) -> str:
+        """JID dung de TRA LOI (khac voi to_jid cua su kien nhan vao).
+
+        Theo docs Zoom, "toJid" trong webhook nghia la JID cua channel/user MA TIN
+        NHAN DUOC GUI DEN - trong chat 1:1, do chinh la JID cua BOT (nguoi nhan tin),
+        khong phai cua nguoi dung. Neu dung nguyen toJid de tra loi trong truong hop
+        1:1, Zoom se tra 7004 "No channel or user can be found with the given to_jid"
+        vi ban dang co gui tin nhan CHO CHINH BOT. Chi khi la kenh nhom (channel_name
+        khac rong) thi toJid moi la dich hop le (JID cua channel) de tra loi ve."""
+        return self.to_jid if self.channel_name else self.sender_jid
 
 
 def verify_webhook_token(authorization_header: str) -> bool:
@@ -112,13 +125,13 @@ async def _access_token() -> str:
 _MAX_MESSAGE_CHARS = 4096  # Gioi han cua Zoom Team Chat cho 1 tin nhan (docs Zoom).
 
 
-async def _post_message(to_jid: str, text: str, user_jid: str) -> None:
+async def _post_message(to_jid: str, text: str, user_jid: str, account_id: str) -> None:
     token = await _access_token()
     body = {
         "robot_jid": settings.zoom_bot_jid,
         "to_jid": to_jid,
         "user_jid": user_jid,
-        "account_id": settings.zoom_account_id,
+        "account_id": account_id,
         "content": {"body": [{"type": "message", "text": text}]},
     }
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
@@ -126,27 +139,38 @@ async def _post_message(to_jid: str, text: str, user_jid: str) -> None:
             _MESSAGE_URL, json=body, headers={"Authorization": f"Bearer {token}"}
         )
     if response.status_code >= 400:
-        # Log ro noi dung Zoom tra ve (vi du "text too long", sai to_jid...) thay vi de
-        # raise_for_status() nuot mat ly do that su - giup chan doan nhanh hon.
+        # Log ro noi dung Zoom tra ve (vi du "text too long", sai to_jid, sai
+        # account_id...) thay vi de raise_for_status() nuot mat ly do that su - giup
+        # chan doan nhanh hon.
         logger.error(
-            "Zoom send message failed (%s) to_jid=%s: %s",
+            "Zoom send message failed (%s) to_jid=%s user_jid=%s account_id=%s: %s",
             response.status_code,
             to_jid,
+            user_jid,
+            account_id,
             response.text,
         )
     response.raise_for_status()
 
 
-async def send_message(to_jid: str, text: str, user_jid: str | None = None) -> None:
+async def send_message(
+    to_jid: str, text: str, user_jid: str | None = None, account_id: str | None = None
+) -> None:
     # user_jid (JID cua nguoi bot dang gui thay mat) la truong BAT BUOC theo Zoom
     # Chatbot API - thieu no Zoom tra ve 400 "Invalid request body format" (code 7001).
     # Mac dinh dung to_jid khi khong co user_jid rieng (vi du chat 1:1, to_jid chinh la
     # sender).
     effective_user_jid = user_jid or to_jid
+    # account_id PHAI la accountId cua chinh webhook event chua to_jid nay - dung
+    # settings.zoom_account_id (config tinh) khi khong lay duoc tu event lam fallback,
+    # nhung uu tien gia tri tu event de tranh 7004 "No channel or user can be found".
+    effective_account_id = account_id or settings.zoom_account_id
     # Zoom Team Chat tu choi (400) neu 1 tin nhan vuot qua 4096 ky tu. Cat nho thanh
     # nhieu tin thay vi gui nguyen mot khoi dai (vi du cau tra loi AI dai).
     for i in range(0, len(text), _MAX_MESSAGE_CHARS):
-        await _post_message(to_jid, text[i : i + _MAX_MESSAGE_CHARS], effective_user_jid)
+        await _post_message(
+            to_jid, text[i : i + _MAX_MESSAGE_CHARS], effective_user_jid, effective_account_id
+        )
 
 
 def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
@@ -172,6 +196,13 @@ def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
     channel_name = str(
         event_payload.get("channelName") or event_payload.get("channel_name") or ""
     ).strip()
+    # QUAN TRONG: accountId trong TUNG webhook event - KHONG dung settings.zoom_account_id
+    # tinh khi goi lai API gui tin nhan, vi to_jid chi resolve dung trong dung ngu canh
+    # account da phat sinh no. Dung sai account_id se khien Zoom tra 7004 "No channel or
+    # user can be found with the given to_jid" du to_jid hoan toan hop le.
+    account_id = str(
+        event_payload.get("accountId") or event_payload.get("account_id") or ""
+    ).strip()
     event_id = str(
         event_payload.get("messageId")
         or event_payload.get("message_id")
@@ -179,7 +210,7 @@ def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
     ).strip()
     if not sender_jid or not text or not event_id:
         return None
-    return ZoomEvent(event_id, sender_jid, text, to_jid, channel_name)
+    return ZoomEvent(event_id, sender_jid, text, to_jid, channel_name, account_id)
 
 
 async def resolve_user(sender_jid: str) -> User | None:
