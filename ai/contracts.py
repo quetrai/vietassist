@@ -12,7 +12,7 @@ class TaskType(StrEnum):
     PRODUCT_SEARCH = "product_search"
     STOCK_NARRATIVE = "stock_narrative"
     STOCK_RESEARCH = "stock_research"
-    FUNDAMENTAL_RESEARCH = "fundamental_research"
+    TRANSLATION = "translation"
 
 
 @dataclass(frozen=True)
