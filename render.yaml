@@ -28,23 +28,3 @@ services:
         sync: false
       - key: ZALO_ENABLED
         value: "false"
-      - key: DB_POOL_MIN_SIZE
-        value: "1"
-      - key: DB_POOL_MAX_SIZE
-        value: "4"
-      - key: GROQ_MAX_CONCURRENCY
-        value: "3"
-      - key: OPENROUTER_MAX_CONCURRENCY
-        value: "2"
-      - key: GOOGLE_MAX_CONCURRENCY
-        value: "2"
-      - key: GROQ_REALTIME_MAX_CONCURRENCY
-        value: "1"
-      - key: PROVIDER_CIRCUIT_BREAKER_FAILURES
-        value: "3"
-      - key: PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SEC
-        value: "30"
-      - key: AI_MAX_CONCURRENCY
-        value: "3"
-      - key: REINDEX_ON_STARTUP
-        value: "false"

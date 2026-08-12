@@ -1,9 +1,11 @@
 # VietAssist
 
-Trợ lý AI đa kênh cho Telegram và Zalo: chat nhanh (Groq/OpenRouter, có fallback), tra
-cứu có grounding qua Google Search (giá sản phẩm, tin vĩ mô), chuyển ảnh thành prompt
-bằng Gemini vision, phân tích cổ phiếu Việt Nam theo policy deterministic (không để LLM
-tự bịa số liệu), ghi chú, nhắc nhở, theo dõi danh mục đầu tư, và tóm tắt nhóm chat Zalo.
+Trợ lý AI đa kênh cho Telegram và Zalo: chat nhanh (Groq/OpenRouter, có fallback, nhớ được
+sự thật bền vững về người dùng qua các phiên), tra cứu có grounding qua Google Search (giá
+sản phẩm, tin vĩ mô), chuyển ảnh thành prompt bằng Gemini vision, phân tích cổ phiếu Việt
+Nam theo policy deterministic có chuẩn hoá theo ngành và cổng chất lượng dữ liệu (không để
+LLM tự bịa số liệu), ghi chú, nhắc nhở (gõ lệnh hoặc chat tự do), theo dõi danh mục đầu tư
+kèm mức stop/target tham khảo, và tóm tắt nhóm chat Zalo.
 
 ## Mục lục
 
@@ -15,7 +17,6 @@ tự bịa số liệu), ghi chú, nhắc nhở, theo dõi danh mục đầu tư
 - [Deploy production](#deploy-production)
 - [Kiểm tra / CI thủ công](#kiểm-tra--ci-thủ-công)
 - [Vận hành & xử lý sự cố](#vận-hành--xử-lý-sự-cố)
-- [UptimeRobot & chống spin down](#uptimerobot--chống-spin-down)
 - [Giới hạn đã biết](#giới-hạn-đã-biết)
 
 ## Kiến trúc
@@ -41,11 +42,43 @@ tự bịa số liệu), ghi chú, nhắc nhở, theo dõi danh mục đầu tư
   prompt tái tạo. Hoạt động trên cả Telegram (ảnh + caption) và Zalo (ảnh gửi trực tiếp
   cho Zalo B, không hỗ trợ trong group).
 - **Chứng khoán:** dữ liệu giá lấy từ DNSE (nguồn chính, có retry), tự động rơi về
-  `vnstock`/VCI nếu DNSE lỗi hoặc dữ liệu không hợp lệ. Nến hôm nay bị bỏ qua khi tính
-  chỉ báo nếu thị trường chưa đóng cửa, để tín hiệu không đổi qua lại giữa phiên. Mọi
-  quyết định/tín hiệu tính bằng code thuần (`stock/policy.py`, có thêm chặn thanh khoản
-  thấp và trần rủi ro stop) — LLM chỉ được dùng để diễn giải kết quả đã tính sẵn, không
-  bao giờ tự tính hay tự đưa ra khuyến nghị số liệu. Các ngưỡng trong `policy.py` là ước lượng thô. Repo không tích hợp backtest, walk-forward hoặc optimizer; nếu cần hiệu chỉnh ngưỡng, thực hiện ngoài production.
+  `vnstock`/VCI nếu DNSE lỗi hoặc dữ liệu không hợp lệ. Giá hiển thị ở `/quote` và tự nhận
+  diện mã 3 chữ cái ưu tiên tick khớp lệnh realtime (`stock/market.py::fetch_realtime_tick`),
+  fallback về nến OHLC nếu không có tick. Nến hôm nay bị bỏ qua khi tính chỉ báo nếu thị
+  trường chưa đóng cửa, để tín hiệu không đổi qua lại giữa phiên. Mọi quyết định/tín hiệu
+  tính bằng code thuần (`stock/policy.py`, có thêm chặn thanh khoản thấp và trần rủi ro
+  stop) — LLM chỉ được dùng để diễn giải kết quả đã tính sẵn, không bao giờ tự tính hay tự
+  đưa ra khuyến nghị số liệu. Các ngưỡng trong `policy.py` là ước lượng thô, chưa qua
+  backtest — tự điều chỉnh nếu cần.
+  - **Fundamentals theo ngành** (`stock/fundamentals.py`, `stock/sector.py`,
+    `stock/fundamental_profiles.py`): P/E, P/B, EPS, ROE, tỷ suất cổ tức, D/E, current
+    ratio từ `vnstock`, chuẩn hoá theo ngành — ngân hàng/chứng khoán/bảo hiểm ưu tiên P/B
+    (ẩn D/E vì không áp dụng), bất động sản nhìn đòn bẩy/thanh khoản, còn lại nhìn P/E. Có
+    so sánh nhanh với vài mã tiêu biểu cùng ngành và percentile P/E so với lịch sử chính mã
+    đó. Không có nguồn nào trả lỗi thì `/stock` vẫn chạy bình thường, chỉ thiếu phần này.
+  - **Cổng chất lượng dữ liệu** (`stock/validation.py`): 3 mức ok/degraded/bad — "bad"
+    (vi phạm contract OHLCV, quá ít phiên) chặn phân tích hẳn; "degraded" (dữ liệu cũ,
+    biến động 1 phiên bất thường, hơi ít phiên so với khuyến nghị) vẫn phân tích nhưng nêu
+    rõ hạn chế trong phần rủi ro của báo cáo.
+  - **Cảnh báo giá chưa điều chỉnh** (`stock/price_adjust.py`): phát hiện gap giá vượt biên
+    độ 1 phiên của mọi sàn VN (dấu hiệu chia tách/cổ tức chưa được điều chỉnh trong nguồn
+    dữ liệu) và cảnh báo rõ để không dùng SMA/RSI/support-resistance bị méo làm căn cứ mạnh.
+  - **Tin tức theo mã** (`stock/news.py`): gọi lại Google Search grounding sẵn có, giới hạn
+    đúng mã, đưa vào làm NGỮ CẢNH THAM KHẢO — không đổi action/giá/stop/target đã tính.
+  - **Stop/target tham khảo** (`/muctieu`, xem mục lệnh Telegram): lưu mức giá tham khảo
+    trên từng mã đang giữ, hiển thị cảnh báo khi tra `/danhmuc` nếu giá đã chạm mức — KHÔNG
+    có vòng lặp nền tự kiểm tra giá theo chu kỳ để chủ động bắn thông báo (muốn chủ động thì
+    dùng `/nhac` tự đặt nhắc nhở kiểm tra giá theo giờ mong muốn).
+- **Trí nhớ dài hạn** (`services/memory.py`): sau mỗi lượt chat tự do (không phải lệnh
+  `/...`), bot trích fact bền vững về người dùng (tên, sở thích, mối quan tâm...) chạy NGẦM
+  (không làm chậm phản hồi), hợp nhất với fact cũ, lưu vào bảng `user_memory`, rồi chèn lại
+  vào system prompt ở các lượt chat sau. Tự tắt êm (không lỗi, chat chính vẫn chạy bình
+  thường) nếu lượt trích xuất gặp lỗi provider hay JSON không hợp lệ.
+- **Router ý định ngôn ngữ tự nhiên** (`services/intent_router.py`): chat tự do kiểu "ghi
+  chú giúp anh mua sữa" hoặc "8 giờ tối nhắc anh gọi mẹ" được tự nhận diện và gọi đúng
+  `services/reminders.py`, không bắt buộc phải gõ đúng `/ghichu`/`/nhac`. Chỉ áp dụng cho
+  nhánh chat thường (không áp dụng cho các câu hỏi cần dữ liệu hiện hành hay lệnh `/...`
+  tường minh) — nếu không khớp ý định nào rõ ràng, rơi xuống chat bình thường êm, không lỗi.
 - **Dữ liệu:** PostgreSQL (khuyến nghị Supabase), cô lập theo `user_id`. Session đăng nhập
   Zalo được mã hoá at-rest; `SETTINGS_ENC_KEY` bắt buộc khi bật Zalo.
 - **Web server:** FastAPI (`web.py`) phục vụ webhook Telegram + endpoint cầu nối
@@ -122,17 +155,34 @@ luôn khớp với code vì được sinh tự động từ `services/commands.p
 
 Tóm tắt các nhóm lệnh:
 
-- **Chat tự do:** gõ bất kỳ câu gì không phải lệnh → trả lời qua Groq (fallback OpenRouter).
+- **Chat tự do:** gõ bất kỳ câu gì không phải lệnh → trả lời qua Groq (fallback
+  OpenRouter). Bot nhớ được sự thật bền vững về bạn qua các lần chat trước (xem mục Kiến
+  trúc — Trí nhớ dài hạn). Nếu câu nói khớp rõ ý định ghi chú/nhắc nhở (vd "ghi chú giúp
+  anh...", "8 giờ tối nhắc anh gọi mẹ"), bot tự lưu luôn mà không cần gõ đúng lệnh `/...`.
 - **Tra cứu có grounding:** `/gia <sản phẩm>`, `/vimo <câu hỏi vĩ mô/tin tức>`.
+- **Dịch Nhật↔Việt:** `/dich [ja>vi|vi>ja] <nội dung>` — dịch chat công việc kỹ thuật giữa
+  KIV và phía Nhật, không chỉ định chiều thì tự nhận diện qua chữ Nhật trong câu (có chữ
+  Nhật → dịch sang Việt, ngược lại → dịch sang Nhật). Bám sát tài liệu tham chiếu văn
+  phong/thuật ngữ `reference/nhat_viet_translation.md` (cách xưng hô, cấu trúc câu, thuật
+  ngữ kỹ thuật cần giữ ổn định như RC/FMEA/CP/KIV, quy tắc số liệu/đơn vị) — file này nạp
+  NGUYÊN VẸN vào system prompt mỗi lượt (không qua RAG top-k, không nằm trong
+  `KNOWLEDGE_BASE_DIR`, đổi qua biến `TRANSLATION_REFERENCE_PATH` nếu muốn dùng file
+  khác). Vì payload lớn nên ưu tiên OpenRouter trước (context dài nhất), Groq rồi Google
+  là các tầng fallback (`ai/router.py::translate`).
 - **Ảnh → prompt:** gửi ảnh trực tiếp (Telegram/Zalo) để Gemini vision đọc framing, pose,
   outfit, lighting, camera/lens và photographic finish rồi viết prompt tiếng Anh tự chứa.
   Có thể kèm caption như `giữ mặt tôi`, `cô gái 20`, hoặc yêu cầu đổi bối cảnh. `/prompt
   <mô tả>` dùng cùng bộ rule để tạo prompt từ text.
-- **Chứng khoán:** `/stock <MÃ> [sâu]` (phân tích), `/quote <MÃ>` (tra nhanh giá) — mẹo:
-  gõ đúng 3 chữ cái (vd `FPT`) không cần gõ `/quote`.
-- **Danh mục:** `/muavao <MÃ> <KL> <giá>`, `/banra <MÃ> <KL>`, `/xoadanhmuc <MÃ>`, `/danhmuc`.
-- **Ghi chú:** `/ghichu <nội dung>`, `/dsghichu`, `/xoaghichu <id>`.
-- **Nhắc nhở:** `/nhac <30p|2h|1ngay|HH:MM> <nội dung>`, `/dsnhac`, `/xoanhac <id>`.
+- **Chứng khoán:** `/stock <MÃ> [sâu]` (phân tích kèm fundamentals theo ngành, cảnh báo
+  chất lượng dữ liệu, tin tức liên quan nếu có), `/quote <MÃ>` (tra nhanh giá realtime) —
+  mẹo: gõ đúng 3 chữ cái (vd `FPT`) không cần gõ `/quote`.
+- **Danh mục:** `/muavao <MÃ> <KL> <giá>`, `/banra <MÃ> <KL>`, `/xoadanhmuc <MÃ>`,
+  `/muctieu <MÃ> <giá stop hoặc -> <giá target hoặc ->` (mức tham khảo, hiển thị lại trong
+  `/danhmuc` khi giá chạm mức — không tự động bắn thông báo), `/danhmuc`.
+- **Ghi chú:** `/ghichu [nội dung]` — có nội dung: lưu; để trống: xem danh sách (giống
+  `/dsghichu`, vẫn giữ làm alias). `/xoaghichu <id>` xoá.
+- **Nhắc nhở:** `/nhac [30p|2h|1ngay|HH:MM] [nội dung]` — có nội dung: đặt nhắc nhở; để
+  trống: xem danh sách (giống `/dsnhac`, vẫn giữ làm alias). `/xoanhac <id>` xoá.
 - **Quản trị Zalo** (chỉ Telegram owner dùng được): `/zalopair <id_zalo> [tên]` cấp quyền
   user, `/zaloadmin <id_zalo> [tên]` cấp quyền admin (được dùng tính năng nhóm),
   `/zalokhoa`/`/zalomokhoa <id_zalo>` khoá/mở khoá, `/zaloxoa <id_zalo>` gỡ quyền,
@@ -146,6 +196,13 @@ Tóm tắt các nhóm lệnh:
   hỗ trợ, áp dụng cho chat tự do và kết quả lệnh (`/stock`, `/gia`, `/vimo`...). Tự chia
   đoạn nếu vượt 4096 ký tự (giới hạn 1 tin nhắn Telegram) và tự rơi về plain text nếu HTML
   bị lệch thẻ thay vì lỗi im lặng.
+  - **Prompt tạo ảnh** (`/prompt`, cả nhập text lẫn gửi ảnh) KHÔNG dùng `tg_format.py` cho
+    phần thân prompt — dùng riêng `services/tg_format_codeblock.py`, gửi trong khối
+    `<pre>` (Telegram hiện nút Copy) thay vì convert markdown. Lý do: prompt tiếng Anh hay
+    chứa nhiều dấu `*`/`_` (vd `--ar 4:5`, `snake_case`) mà `tg_format.py` sẽ hiểu nhầm
+    thành in đậm/in nghiêng và nuốt mất ký tự, khiến bản chép ra khác bản AI trả về. Cắt
+    đoạn cũng tính theo ký tự THÔ trước khi escape HTML, không bao giờ cắt ngang giữa 1
+    entity đã escape như `&amp;`.
 
 ## Sử dụng — Zalo
 
@@ -160,13 +217,14 @@ người.
 4. Bot báo "Đăng nhập Zalo B thành công" — từ giờ container restart không cần quét lại
    (session được lưu, mã hoá nếu có `SETTINGS_ENC_KEY`).
 
-**Cấp quyền cho người dùng:** người dùng Zalo A có thể nhắn tin cho Zalo B bình thường
-trước khi pair. VietAssist không trả lời AI và không xử lý lệnh ở giai đoạn này. Khi owner
-Telegram dùng `/zalopair <id>`, tài khoản đó mới được chuyển sang bot mode. Dùng
-`/zaloadmin <id>` nếu muốn cấp quyền quản lý nhóm.
+**Cấp quyền cho người dùng:** người dùng Zalo A nhắn cho Zalo B lần đầu khi CHƯA được cấp
+quyền sẽ **không nhận được trả lời gì cả** — Zalo B cố tình im lặng như 1 tài khoản Zalo
+bình thường, không lộ ra là bot cho người lạ. Đồng thời Telegram owner nhận thông báo ngầm
+kèm sẵn lệnh `/zalopair <id> để pair`. Dùng `/zaloadmin <id>` thay vì `/zalopair` nếu muốn
+người đó dùng được tính năng quản lý nhóm.
 
-**Dùng trong chat 1-1 với Zalo B:** sau khi pair, toàn bộ lệnh ở mục "Sử dụng — lệnh Telegram"
-phía trên đều dùng được (gõ y hệt, có dấu `/`), trừ các lệnh quản trị Zalo/Telegram-only
+**Dùng trong chat 1-1 với Zalo B:** toàn bộ lệnh ở mục "Sử dụng — lệnh Telegram" phía trên
+đều dùng được (gõ y hệt, có dấu `/`), trừ các lệnh quản trị Zalo/Telegram-only
 (`/zalopair`, `/zaloadmin`, `/zalologin`...). Ngoài ra:
 - **Gửi ảnh trực tiếp cho Zalo B** (không cần gõ `/prompt`) → bot tự nhận diện, phân tích
   ảnh bằng Gemini vision và trả lời prompt tái tạo. Gõ kèm caption cùng ảnh nếu muốn định
@@ -207,46 +265,41 @@ Việc cần làm thủ công trên Render dashboard (không nằm trong `render
    đặt 1 chuỗi ngẫu nhiên khác — dùng để `zalo-gateway` xác thực với `web.py`).
 3. Nếu dùng Zalo, đổi `ZALO_ENABLED` thành `true` trong `render.yaml` hoặc override trên
    dashboard, rồi làm theo mục "Sử dụng — Zalo" ở trên (`/zalologin` qua Telegram).
+4. Đăng ký UptimeRobot để service không bị ngủ — xem mục "Giữ service không ngủ
+   (UptimeRobot)" ngay dưới đây.
 
-**Health check:** `GET /health` là endpoint liveness nhẹ, không gọi AI, Zalo hoặc PostgreSQL.
-Render dùng `/health` cho health check và UptimeRobot có thể ping cùng endpoint này để tạo
-inbound traffic định kỳ. `GET /ready` là readiness check thủ công, kiểm tra process Telegram
-và PostgreSQL; dùng endpoint này để chẩn đoán khi service chưa sẵn sàng, không dùng làm endpoint
-UptimeRobot.
+**Health check:** `render.yaml` khai `healthCheckPath: /health` — endpoint này chỉ trả
+`{"status": "ok"}` ngay lập tức, không đụng DB/Telegram, dùng để Render biết process còn
+sống (liveness) khi quyết định route traffic sau mỗi lần deploy. `GET /ready` là một
+endpoint riêng, nặng hơn (kiểm tra cả kết nối PostgreSQL lẫn process Telegram) — không
+gắn vào `healthCheckPath` của Render vì một lần DB chập chờn thoáng qua không nên khiến
+Render coi cả service là "down" và restart; dùng `/ready` khi cần tự tay kiểm tra hoặc gắn
+vào một hệ thống giám sát riêng muốn biết chính xác "đã sẵn sàng phục vụ" thay vì chỉ
+"process chưa chết".
 
-**Giới hạn Render free plan:** service có thể spin down sau khoảng 15 phút không có inbound
-traffic. Nếu muốn giảm khả năng spin down, cấu hình UptimeRobot monitor ping `GET /health`
-định kỳ, nên đặt chu kỳ thấp hơn 15 phút (ví dụ 5 phút). `/health` được thiết kế cực nhẹ để
-việc ping định kỳ không tạo truy vấn database hoặc gọi AI. UptimeRobot chỉ giúp duy trì traffic
-để hạn chế idle spin down; nó **không biến Render Free thành dịch vụ có SLA 24/7**. Nếu instance
-đã sleep hoặc bị restart vì lý do khác, các background loop trong process vẫn có thể bị gián đoạn.
-Đặc biệt, `reminder_loop` và `daily_digest_loop` không nên được xem là scheduler có SLA tuyệt đối
-trên Render Free. Nếu reminder/digest đúng giờ là yêu cầu bắt buộc, nên chuyển scheduler sang một
-dịch vụ có khả năng chạy job độc lập.
+**Giữ service không ngủ (UptimeRobot):** Render free plan cho service ngủ sau ~15 phút
+không có traffic HTTP đến — Vòng lặp nhắc nhở (`reminder_loop`) và digest hằng ngày
+(`daily_digest_loop`) chỉ chạy khi process còn sống, nên nếu service ngủ, nhắc nhở có thể
+trễ hoặc không bắn đúng giờ. Cách khắc phục miễn phí: dùng
+[UptimeRobot](https://dashboard.uptimerobot.com/monitors) ping định kỳ để Render luôn thấy
+có traffic và không bao giờ ngủ.
 
-### UptimeRobot & chống spin down
+1. Đăng nhập [dashboard.uptimerobot.com/monitors](https://dashboard.uptimerobot.com/monitors),
+   bấm **Add New Monitor**.
+2. **Monitor Type:** `HTTP(s)`. **Friendly Name:** tuỳ ý (vd `vietassist`). **URL:**
+   `https://<tên-app>.onrender.com/health` (đúng URL đã điền vào `WEBHOOK_BASE_URL`, thêm
+   `/health`).
+3. **Monitoring Interval:** `5 minutes` (mức thấp nhất của plan free UptimeRobot, cũng là
+   đủ để Render không tính là "không có traffic").
+4. Lưu lại. Không cần thêm header hay auth gì — `/health` cố tình để công khai, không đọc
+   DB, không gọi AI provider nào nên ping liên tục không tốn quota hay chi phí.
 
-VietAssist được thiết kế để dùng UptimeRobot với endpoint `/health`. Cấu hình monitor HTTP(s)
-trỏ tới URL public của service, ví dụ:
+Lưu ý: Render free plan giới hạn tổng ~750 giờ chạy/tháng CHO TOÀN BỘ service free trong
+workspace (một tháng ~730 giờ) — nếu đây là service free duy nhất, ping 24/7 vẫn nằm trong
+hạn mức; nếu có thêm service free khác cùng workspace, tổng giờ chạy cả hai có thể vượt hạn
+mức và bị Render tạm ngừng tới đầu chu kỳ tháng sau.
 
-```text
-https://<ten-service>.onrender.com/health
-```
-
-Thiết lập chu kỳ kiểm tra **5 phút** hoặc một chu kỳ khác nhỏ hơn 15 phút. Không cần ping `/ready`
-cho mục đích này vì `/ready` có truy vấn PostgreSQL và được dành cho readiness/diagnostics.
-
-Quy trình kiểm tra:
-
-1. Mở UptimeRobot và tạo hoặc chỉnh HTTP(s) monitor.
-2. Đặt URL là `https://<ten-service>.onrender.com/health`.
-3. Đặt monitoring interval nhỏ hơn 15 phút; 5 phút là lựa chọn phù hợp.
-4. Sau khi deploy, xác nhận monitor nhận HTTP `200`.
-5. Khi cần kiểm tra dependency, mở `https://<ten-service>.onrender.com/ready` hoặc xem log Render.
-
-UptimeRobot monitor hiện tại của VietAssist có thể tiếp tục dùng nếu đang trỏ đúng tới `/health`.
-
-## Kiểm tra thủ công
+## Kiểm tra / CI thủ công
 
 Chưa có CI tự động (không có `.github/workflows/`) — chạy tay trước khi commit:
 
@@ -276,6 +329,17 @@ npm run build                       # build thử, đảm bảo không lỗi com
 - **Muốn xoá dữ liệu cũ thủ công:** `processed_events` (30 ngày) và `zalo_group_messages`
   (90 ngày) được tự dọn hằng ngày (`services/maintenance.py`), không cần can thiệp tay
   trừ khi cần đổi ngưỡng retention (sửa hằng số trong file đó).
+- **`/stock` không thấy phần fundamentals/tin tức:** cả hai đều best-effort, tự bỏ qua êm
+  nếu lỗi (`vnstock` đổi cấu trúc dữ liệu, hoặc `GOOGLE_API_KEY` chưa cấu hình cho phần tin
+  tức) — không phải bug, `/stock` vẫn chạy đủ phần kỹ thuật (chart/policy) bình thường.
+- **Bot có vẻ "quên" thông tin đã nói trước đó:** trí nhớ dài hạn (`services/memory.py`)
+  chỉ trích fact BỀN VỮNG (tên, sở thích, mối quan tâm dài hạn...), cố tình bỏ qua chuyện
+  phiếm/thông tin nhất thời — không lưu lại mọi câu đã nói. Muốn kiểm tra bot đang nhớ gì,
+  đọc trực tiếp cột `facts` trong bảng `user_memory` (chưa có lệnh Telegram để tự xem/xoá).
+- **"Ghi chú giúp anh..." qua chat tự do không được lưu:** router ý định
+  (`services/intent_router.py`) chỉ kích hoạt khi câu nói RÕ RÀNG khớp ý định ghi
+  chú/nhắc nhở; câu mơ hồ sẽ rơi xuống chat bình thường thay vì đoán liều — gõ đúng
+  `/ghichu`/`/nhac` nếu muốn chắc chắn 100%.
 
 ## Giới hạn đã biết
 
@@ -293,4 +357,18 @@ nhân/nhóm nhỏ, không phải oversight:
   scale ngang nhiều instance — chỉ đúng khi chạy 1 instance (đúng với Render free plan
   hiện tại).
 - **Không có CI tự động** — lint/test phải chạy tay trước khi deploy (xem mục phía trên).
+- **Trí nhớ dài hạn + router ý định tự nhiên** (`services/memory.py`,
+  `services/intent_router.py`) mỗi cái thêm 1 lượt gọi LLM phụ / tin nhắn chat tự do (không
+  áp dụng cho lệnh `/...` hay câu hỏi cần dữ liệu hiện hành) — chấp nhận được ở quy mô cá
+  nhân/nhóm nhỏ, nhưng là chi phí/độ trễ thật, không miễn phí. Cả 2 đều fail-open (lỗi
+  provider/JSON thì bỏ qua êm, rơi về hành vi cũ) nên không làm crash chat chính.
+- **Stop/target giá trong `/muctieu`** chỉ lưu để hiển thị lại khi bạn chủ động tra
+  `/danhmuc` — KHÔNG có vòng lặp nền tự kiểm tra giá theo chu kỳ để chủ động đẩy thông báo
+  khi chạm mức (khác với tên gọi "target" có thể gợi ý). Cần chủ động thì dùng `/nhac`.
+- **Backtest chưa được port** — repo tham khảo (Gemini) có công cụ backtest walk-forward
+  offline để kiểm định `stock/policy.py` bằng dữ liệu lịch sử thật; đây là công cụ dev, cần
+  chạy tay ngoài chat, nên cố tình bỏ qua để giữ phạm vi rõ ràng.
 
+## CI
+
+GitHub Actions validates Python lint/format/tests and the Zalo gateway typecheck/build on every push and pull request.

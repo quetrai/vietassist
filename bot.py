@@ -6,7 +6,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -21,42 +21,14 @@ from core import database, knowledge
 from core.config import settings
 from core.models import Channel, Role, User
 from services import commands, zalo_admin, zalo_login
-from services.concurrency import assistant_turn
 from services.chat import chat
 from services.prompt_engine import build_image_prompt_instruction
 from services.tg_format import reply_rich
+from services.tg_format_codeblock import reply_code_block
 from stock.market import close as close_stock
 
 logger = logging.getLogger(__name__)
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
-
-
-TELEGRAM_MENU = [
-    BotCommand("start", "Bắt đầu VietAssist"),
-    BotCommand("help", "Xem toàn bộ hướng dẫn"),
-    BotCommand("reset", "Xóa ngữ cảnh chat"),
-    BotCommand("memory", "Xem trí nhớ dài hạn"),
-    BotCommand("forget", "Xóa trí nhớ dài hạn"),
-    BotCommand("quote", "Giá cổ phiếu realtime"),
-    BotCommand("gia", "Tra giá sản phẩm hiện tại"),
-    BotCommand("stock", "Phân tích cổ phiếu"),
-    BotCommand("status", "Trạng thái provider AI"),
-    BotCommand("fundamental", "Phân tích cơ bản cổ phiếu"),
-    BotCommand("vimo", "Tin tức và vĩ mô"),
-    BotCommand("danhmuc", "Xem danh mục"),
-    BotCommand("muavao", "Ghi nhận mua cổ phiếu"),
-    BotCommand("banra", "Ghi nhận bán cổ phiếu"),
-    BotCommand("nhac", "Đặt nhắc nhở"),
-    BotCommand("dsnhac", "Xem nhắc nhở"),
-    BotCommand("xoanhac", "Hủy nhắc nhở"),
-    BotCommand("ghichu", "Lưu ghi chú"),
-    BotCommand("xoaghichu", "Xóa ghi chú"),
-    BotCommand("dsghichu", "Xem ghi chú"),
-    BotCommand("prompt", "Tạo prompt ảnh"),
-    BotCommand("rag", "Bật/tắt Knowledge Base"),
-    BotCommand("kbreindex", "Reindex Knowledge Base"),
-    BotCommand("zalologin", "Đăng nhập Zalo B"),
-]
 
 ZALO_ADMIN_COMMANDS = {
     "zalopair": zalo_admin.pair,
@@ -99,12 +71,75 @@ def _start_text() -> str:
     return "\n".join(lines)
 
 
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(_start_text())
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(_start_text())
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Alias của /start — /help là tên người dùng có xu hướng gõ theo phản xạ
+    # (Telegram, hầu hết app khác) khi không nhớ lệnh nào, nên trỏ về cùng
+    # nội dung hướng dẫn thay vì bắt nhớ riêng "/start".
+    await update.effective_message.reply_text(_start_text())
+
+
+# Mô tả ngắn hiển thị trong menu lệnh gốc của Telegram (nút "/" cạnh ô nhập
+# tin nhắn) — KHÔNG lặp lại "/tên_lệnh" vì Telegram đã hiển thị tên lệnh riêng.
+_MENU_DESCRIPTIONS: dict[str, str] = {
+    "start": "Xem hướng dẫn dùng bot",
+    "help": "Xem hướng dẫn dùng bot (giống /start)",
+    "gia": "Tra giá bán hiện tại, vd: /gia iphone 16",
+    "prompt": "Viết prompt tạo ảnh từ mô tả",
+    "stock": "Phân tích cổ phiếu, vd: /stock FPT sâu",
+    "vimo": "Tin tức/vĩ mô thị trường",
+    "quote": "Tra nhanh giá cổ phiếu theo mã",
+    "ghichu": "Lưu ghi chú — để trống để xem danh sách",
+    "dsghichu": "Xem danh sách ghi chú",
+    "xoaghichu": "Xoá ghi chú theo id",
+    "nhac": "Đặt nhắc nhở — để trống để xem danh sách",
+    "dsnhac": "Xem danh sách nhắc nhở",
+    "xoanhac": "Xoá nhắc nhở theo id",
+    "muavao": "Ghi nhận mua cổ phiếu vào danh mục",
+    "banra": "Ghi nhận bán cổ phiếu",
+    "xoadanhmuc": "Xoá mã khỏi danh mục",
+    "muctieu": "Đặt mức stop/target tham khảo cho 1 mã đang giữ",
+    "danhmuc": "Xem danh mục đầu tư",
+    "rag": "Bật/tắt tra cứu knowledge base cho chat",
+    "zalopair": "Cấp quyền cho 1 người dùng Zalo",
+    "zaloadmin": "Cấp quyền admin nhóm Zalo",
+    "zalokhoa": "Khoá 1 người dùng Zalo",
+    "zalomokhoa": "Mở khoá 1 người dùng Zalo",
+    "zaloxoa": "Xoá quyền 1 người dùng Zalo",
+    "zalodanhsach": "Xem danh sách người dùng Zalo đã pair",
+    "zalologin": "Đăng nhập Zalo B qua mã QR",
+    "kbreindex": "Tính lại embedding knowledge base",
+}
+
+# Thứ tự cố định (không dùng dict.keys() của COMMANDS/ZALO_ADMIN_COMMANDS trực
+# tiếp) để lệnh hay dùng nhất (stock, quote, gia...) hiện lên đầu menu Telegram
+# thay vì theo thứ tự khai báo module.
+_MENU_ORDER: list[str] = [
+    "help", "stock", "quote", "gia", "vimo", "prompt",
+    "ghichu", "nhac", "danhmuc", "muavao", "banra", "muctieu",
+    "xoaghichu", "xoanhac", "xoadanhmuc", "dsghichu", "dsnhac",
+    "rag", "start",
+    "zalopair", "zaloadmin", "zalokhoa", "zalomokhoa", "zaloxoa", "zalodanhsach",
+    "zalologin", "kbreindex",
+]
+
+
+def _bot_commands() -> list[BotCommand]:
+    known = set(commands.COMMANDS) | {f"/{name}" for name in ZALO_ADMIN_COMMANDS} | {
+        "/zalodanhsach", "/zalologin", "/kbreindex", "/start", "/help",
+    }
+    ordered = [f"/{name}" for name in _MENU_ORDER]
+    # An toàn cho tương lai: lệnh mới thêm vào COMMANDS mà quên cập nhật
+    # _MENU_ORDER vẫn xuất hiện trong menu (cuối danh sách) thay vì âm thầm biến mất.
+    ordered += sorted(known - set(ordered))
+    return [
+        BotCommand(name.lstrip("/"), _MENU_DESCRIPTIONS.get(name.lstrip("/"), name))
+        for name in ordered
+        if name in known
+    ]
 
 
 def _rag_keyboard(enabled: bool) -> InlineKeyboardMarkup:
@@ -133,6 +168,15 @@ async def command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     result = await commands.handle(user, text)
+    if cmd.lower() == "/prompt" and result.startswith("📝") and "\n\n" in result:
+        # Prompt tạo ảnh tiếng Anh hay chứa nhiều dấu *, _ (vd "--ar 4:5", "snake_case")
+        # — reply_rich() bên dưới sẽ hiểu nhầm thành markdown bold/italic và nuốt mất ký
+        # tự. Tách header khỏi phần thân, gửi thân trong khối <pre> (services/
+        # tg_format_codeblock.py) để giữ nguyên văn + tiện bấm Copy trên Telegram.
+        header, _, body = result.partition("\n\n")
+        await update.effective_message.reply_text(html.escape(header), parse_mode="HTML")
+        await reply_code_block(update.effective_message, body)
+        return
     # Kết quả lệnh (/stock, /gia, /vimo...) có thể chứa markdown do AI sinh ra
     # (**bold**, gạch đầu dòng...) — convert sang HTML để hiển thị đẹp trên Telegram.
     await reply_rich(update.effective_message, result or "Lệnh chưa được hỗ trợ.")
@@ -205,21 +249,14 @@ async def _reply_prompt(message_obj, prompt: str, hint: str) -> None:
     if not prompt:
         await message_obj.reply_text("Gemini không trả về prompt. Vui lòng thử lại.")
         return
-    # HTML <pre> giữ nguyên dấu *, _, backticks... và thuận tiện cho thao tác copy.
-    header = f"📝 Prompt gợi ý\\n{hint}"
-    escaped = html.escape(prompt)
-    max_body = 3900
-    if len(escaped) <= max_body:
-        await message_obj.reply_text(
-            f"{html.escape(header)}\\n\\n<pre>{escaped}</pre>",
-            parse_mode="HTML",
-        )
-        return
+    # Header gửi HTML thường (không phải <pre>) rồi prompt gửi RIÊNG trong khối <pre>,
+    # để nếu bấm nút Copy của Telegram thì chỉ chép đúng phần prompt, không dính header.
+    # Dùng services/tg_format_codeblock.py (không phải reply_rich) vì prompt tiếng Anh
+    # hay chứa nhiều dấu *, _ (vd "--ar 4:5", "snake_case") — reply_rich sẽ hiểu nhầm
+    # thành markdown bold/italic và nuốt mất ký tự, khiến prompt chép ra khác bản gốc.
+    header = f"📝 Prompt gợi ý\n{hint}"
     await message_obj.reply_text(html.escape(header), parse_mode="HTML")
-    for start in range(0, len(escaped), max_body):
-        await message_obj.reply_text(
-            f"<pre>{escaped[start : start + max_body]}</pre>", parse_mode="HTML"
-        )
+    await reply_code_block(message_obj, prompt)
 
 
 async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -257,8 +294,7 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Ảnh quá lớn sau khi tải xuống. Vui lòng gửi ảnh nhỏ hơn 10 MB."
             )
             return
-        async with assistant_turn(settings.ai_max_concurrency):
-            response = await router.image_prompt(path, instruction)
+        response = await router.image_prompt(path, instruction)
         await _reply_prompt(message_obj, response.text, spec.hint)
     except Exception:
         logger.exception("Lỗi chuyển ảnh thành prompt")
@@ -287,8 +323,11 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def post_init(app: Application) -> None:
     await database.migrate()
-    await app.bot.set_my_commands(TELEGRAM_MENU)
-    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    # Đăng ký menu lệnh gốc của Telegram (nút "/" cạnh ô nhập tin nhắn) — trước
+    # đây chỉ có /start liệt kê lệnh dạng text, người dùng phải nhớ gõ /start
+    # để xem; giờ toàn bộ lệnh + mô tả ngắn hiện sẵn trong menu, gõ "/" là thấy.
+    with contextlib.suppress(Exception):
+        await app.bot.set_my_commands(_bot_commands())
 
 
 async def post_shutdown(app: Application) -> None:
@@ -312,8 +351,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start, filters=owner))
     app.add_handler(CommandHandler("help", help_command, filters=owner))
     for name in commands.COMMANDS:
-        if name == "/help":
-            continue
         app.add_handler(CommandHandler(name.lstrip("/"), command, filters=owner))
     for name in ZALO_ADMIN_COMMANDS:
         app.add_handler(CommandHandler(name, zalo_manage, filters=owner))
