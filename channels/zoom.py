@@ -83,7 +83,10 @@ async def _fetch_access_token() -> tuple[str, int]:
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         response = await client.post(
             _TOKEN_URL,
-            params={"grant_type": "client_credentials"},
+            params={
+                "grant_type": "account_credentials",
+                "account_id": settings.zoom_account_id,
+            },
             auth=(settings.zoom_client_id, settings.zoom_client_secret),
         )
     response.raise_for_status()
@@ -92,8 +95,8 @@ async def _fetch_access_token() -> tuple[str, int]:
 
 
 async def _access_token() -> str:
-    """OAuth server-to-server (client_credentials) — cache theo TTL trừ hao 60s để tránh
-    dùng token vừa hết hạn giữa lúc gọi API gửi tin nhắn."""
+    """Server-to-Server OAuth (account_credentials + account_id) — cache theo TTL trừ hao
+    60s để tránh dùng token vừa hết hạn giữa lúc gọi API gửi tin nhắn."""
     global _cached_token, _cached_token_expiry
     async with _token_lock:
         if _cached_token and time.monotonic() < _cached_token_expiry:
