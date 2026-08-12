@@ -83,16 +83,13 @@ async def _fetch_access_token() -> tuple[str, int]:
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         response = await client.post(
             _TOKEN_URL,
-            params={
-                "grant_type": "account_credentials",
-                "account_id": settings.zoom_account_id,
-            },
+            params={"grant_type": "client_credentials"},
             auth=(settings.zoom_client_id, settings.zoom_client_secret),
         )
     if response.status_code >= 400:
         # Log rõ lý do Zoom từ chối (invalid_client, invalid_request...) thay vì chỉ
         # raise HTTPStatusError chung chung — giúp chẩn đoán nhanh sai client_id/secret/
-        # account_id hay app chưa activate.
+        # scope hay app chưa activate.
         logger.error("Zoom OAuth token request failed (%s): %s", response.status_code, response.text)
     response.raise_for_status()
     payload = response.json()
@@ -100,8 +97,8 @@ async def _fetch_access_token() -> tuple[str, int]:
 
 
 async def _access_token() -> str:
-    """Server-to-Server OAuth (account_credentials + account_id) — cache theo TTL trừ hao
-    60s để tránh dùng token vừa hết hạn giữa lúc gọi API gửi tin nhắn."""
+    """Chatbot token (grant_type=client_credentials, scope imchat:bot) — cache theo TTL
+    trừ hao 60s để tránh dùng token vừa hết hạn giữa lúc gọi API gửi tin nhắn."""
     global _cached_token, _cached_token_expiry
     async with _token_lock:
         if _cached_token and time.monotonic() < _cached_token_expiry:
