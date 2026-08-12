@@ -190,6 +190,10 @@ async function sendFormattedMessage(
   threadId: string,
   type: ThreadType,
 ): Promise<void> {
+  // Do not blindly retry sendMessage. A timeout/reset can happen after Zalo
+  // accepted the message, which would make a retry duplicate user-visible
+  // content. Exactly-once delivery is not exposed by zca-js, so the safe
+  // default is one send attempt and explicit failure propagation.
   await api.sendMessage(
     {msg: formatted.text, styles: formatted.styles},
     threadId,
