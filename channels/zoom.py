@@ -89,6 +89,11 @@ async def _fetch_access_token() -> tuple[str, int]:
             },
             auth=(settings.zoom_client_id, settings.zoom_client_secret),
         )
+    if response.status_code >= 400:
+        # Log rõ lý do Zoom từ chối (invalid_client, invalid_request...) thay vì chỉ
+        # raise HTTPStatusError chung chung — giúp chẩn đoán nhanh sai client_id/secret/
+        # account_id hay app chưa activate.
+        logger.error("Zoom OAuth token request failed (%s): %s", response.status_code, response.text)
     response.raise_for_status()
     payload = response.json()
     return payload["access_token"], int(payload.get("expires_in", 3600))
