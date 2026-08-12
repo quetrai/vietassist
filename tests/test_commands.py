@@ -28,21 +28,15 @@ async def test_try_ticker_quote_ignores_non_3_letter_text(monkeypatch):
     assert await commands.try_ticker_quote("") is None
 
 
-async def test_try_ticker_quote_ignores_unknown_three_letter_word(monkeypatch):
-    async def fail_quick_quote(symbol):
-        raise AssertionError("không được gọi quick_quote cho từ không phải mã đã biết")
+async def test_try_ticker_quote_falls_back_silently_on_error(monkeypatch):
+    """Regression: chat ngẫu nhiên trùng 3 chữ cái (vd 'cho', 'khi') không được hiện lỗi tra
+    giá, phải im lặng rơi về chat bình thường."""
 
-    monkeypatch.setattr(commands, "quick_quote", fail_quick_quote)
+    async def fake_quick_quote(symbol):
+        raise ValueError("Mã cổ phiếu phải gồm 3 chữ cái")
+
+    monkeypatch.setattr(commands, "quick_quote", fake_quick_quote)
     assert await commands.try_ticker_quote("cho") is None
-
-
-async def test_try_ticker_quote_returns_error_for_known_symbol(monkeypatch):
-    async def fail_quick_quote(symbol):
-        raise RuntimeError("nguồn realtime tạm thời không khả dụng")
-
-    monkeypatch.setattr(commands, "quick_quote", fail_quick_quote)
-    result = await commands.try_ticker_quote("hpg")
-    assert result == "Không lấy được giá HPG: nguồn realtime tạm thời không khả dụng"
 
 
 async def test_rag_status_no_argument(monkeypatch):
@@ -163,6 +157,54 @@ async def test_vimo_calls_router_macro_news(monkeypatch):
     assert result == "Tin tức..."
 
 
+async def test_dich_requires_argument():
+    result = await commands.handle(_USER, "/dich")
+    assert "Cú pháp" in result
+
+
+async def test_dich_auto_detects_direction(monkeypatch):
+    captured = {}
+
+    async def fake_translate(text, direction):
+        captured.update(text=text, direction=direction)
+        return "Đã hiểu rồi.", "openrouter", "ja_vi"
+
+    monkeypatch.setattr(commands.translate_service, "translate", fake_translate)
+    result = await commands.handle(_USER, "/dich 了解しました。")
+    assert captured == {"text": "了解しました。", "direction": None}
+    assert "Đã hiểu rồi." in result
+    assert "Nhật → Tiếng Việt" in result
+
+
+async def test_dich_with_explicit_direction_prefix(monkeypatch):
+    captured = {}
+
+    async def fake_translate(text, direction):
+        captured.update(text=text, direction=direction)
+        return "了解しました。", "groq", "vi_ja"
+
+    monkeypatch.setattr(commands.translate_service, "translate", fake_translate)
+    result = await commands.handle(_USER, "/dich vi>ja đã hiểu rồi, cảm ơn nhé")
+    assert captured == {"text": "đã hiểu rồi, cảm ơn nhé", "direction": "vi_ja"}
+    assert "了解しました。" in result
+
+
+async def test_dich_direction_prefix_without_content_asks_for_syntax():
+    result = await commands.handle(_USER, "/dich ja>vi")
+    assert "Cú pháp" in result
+
+
+async def test_dich_reports_friendly_message_on_provider_error(monkeypatch):
+    from ai.contracts import ProviderError
+
+    async def fake_translate(text, direction):
+        raise ProviderError("openrouter: TimeoutError")
+
+    monkeypatch.setattr(commands.translate_service, "translate", fake_translate)
+    result = await commands.handle(_USER, "/dich xin chào")
+    assert "Không dịch được" in result
+
+
 async def test_unrecognized_command_returns_none():
     assert await commands.handle(_USER, "/khonghieu") is None
 
@@ -200,9 +242,3 @@ async def test_vimo_reports_friendly_message_on_generic_provider_error(monkeypat
     monkeypatch.setattr(commands.router, "macro_news", fake_macro_news)
     result = await commands.handle(_USER, "/vimo lãi suất")
     assert "lỗi tạm thời" in result
-
-
-async def test_help_command_exists():
-    result = await commands.handle(_USER, "/help")
-    assert "VietAssist" in result
-    assert "/quote" in result

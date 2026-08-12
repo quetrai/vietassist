@@ -111,6 +111,38 @@ async def test_text_raises_when_all_three_providers_fail():
         await instance.text(TaskType.CHAT, [{"role": "user", "content": "hi"}], system="s")
 
 
+async def test_translate_prefers_openrouter(router):
+    response = await router.translate([{"role": "user", "content": "hi"}], system="s")
+    assert response.provider == "openrouter"
+    assert router.groq.calls == 0
+
+
+async def test_translate_falls_back_to_groq_when_openrouter_fails():
+    instance = AIRouter.__new__(AIRouter)
+    instance.groq = _FakeProvider("groq")
+    instance.openrouter = _FakeProvider("openrouter", fail=True)
+    response = await instance.translate([{"role": "user", "content": "hi"}], system="s")
+    assert response.provider == "groq"
+
+
+async def test_translate_falls_back_to_google_when_others_fail():
+    instance = AIRouter.__new__(AIRouter)
+    instance.groq = _FakeProvider("groq", fail=True)
+    instance.openrouter = _FakeProvider("openrouter", fail=True)
+    instance.google = _FakeProvider("google")
+    response = await instance.translate([{"role": "user", "content": "hi"}], system="s")
+    assert response.provider == "google"
+
+
+async def test_translate_raises_with_task_label_when_all_providers_fail():
+    instance = AIRouter.__new__(AIRouter)
+    instance.groq = _FakeProvider("groq", fail=True)
+    instance.openrouter = _FakeProvider("openrouter", fail=True)
+    instance.google = _FakeProvider("google", fail=True)
+    with pytest.raises(ProviderError, match=r"\[translation\]"):
+        await instance.translate([{"role": "user", "content": "hi"}], system="s")
+
+
 async def test_macro_news_rejects_empty_query(router):
     with pytest.raises(ValueError, match="Thiếu câu hỏi"):
         await router.macro_news("   ")

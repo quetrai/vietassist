@@ -72,11 +72,11 @@ async def test_list_portfolio_computes_pnl(monkeypatch):
     async def fake_list_holdings(user_id):
         return [{"symbol": "FPT", "quantity": 100.0, "average_price": 20000.0}]
 
-    async def fake_fetch(symbol, **kwargs):
-        return _series(symbol, 25000.0)
+    async def fake_current_price(symbol, **kwargs):
+        return 25000.0, False
 
     monkeypatch.setattr(portfolio.database, "list_holdings", fake_list_holdings)
-    monkeypatch.setattr(portfolio, "fetch", fake_fetch)
+    monkeypatch.setattr(portfolio, "_market_current_price", fake_current_price)
 
     result = await portfolio.list_portfolio("u1")
     assert "FPT" in result
@@ -88,11 +88,11 @@ async def test_list_portfolio_handles_price_fetch_failure(monkeypatch):
     async def fake_list_holdings(user_id):
         return [{"symbol": "FPT", "quantity": 100.0, "average_price": 20000.0}]
 
-    async def fake_fetch(symbol, **kwargs):
+    async def fake_current_price(symbol, **kwargs):
         raise ValueError("Không đủ dữ liệu")
 
     monkeypatch.setattr(portfolio.database, "list_holdings", fake_list_holdings)
-    monkeypatch.setattr(portfolio, "fetch", fake_fetch)
+    monkeypatch.setattr(portfolio, "_market_current_price", fake_current_price)
 
     result = await portfolio.list_portfolio("u1")
     assert "không lấy được giá hiện tại" in result
@@ -105,13 +105,13 @@ async def test_list_portfolio_pnl_excludes_unpriced_holdings(monkeypatch):
             {"symbol": "HPG", "quantity": 200.0, "average_price": 30000.0},
         ]
 
-    async def fake_fetch(symbol, **kwargs):
+    async def fake_current_price(symbol, **kwargs):
         if symbol == "HPG":
             raise ValueError("Không đủ dữ liệu")
-        return _series(symbol, 25000.0)
+        return 25000.0, False
 
     monkeypatch.setattr(portfolio.database, "list_holdings", fake_list_holdings)
-    monkeypatch.setattr(portfolio, "fetch", fake_fetch)
+    monkeypatch.setattr(portfolio, "_market_current_price", fake_current_price)
 
     result = await portfolio.list_portfolio("u1")
 

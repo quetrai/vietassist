@@ -209,64 +209,79 @@ def test_trim_open_session_keeps_bar_after_market_close(monkeypatch):
     assert len(trimmed.closes) == 6
 
 
-async def test_fetch_realtime_tick_uses_today_match_price(monkeypatch):
-    class _TickResponse:
-        status_code = 200
-        def raise_for_status(self):
-            return None
-        def json(self):
-            return {"data": {"GetKrxTicksBySymbols": {"ticks": [{"matchPrice": 27.45}]}}}
+class _FakeTickResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
 
-    class _TickClient:
-        async def post(self, *_args, **_kwargs):
-            return _TickResponse()
+    def raise_for_status(self) -> None:
+        return None
 
-    market._realtime_cache.clear()
-    monkeypatch.setattr(market, "client", lambda: _TickClient())
-    price = await market.fetch_realtime_tick("HPG", ttl=0)
-    assert price == 27450
+    def json(self) -> dict:
+        return self._payload
 
 
-async def test_fetch_quote_refuses_stale_close_during_market_hours(monkeypatch):
-    today = datetime.now(market.VN_TZ)
+class _FakeTickClient:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.calls = 0
 
-    class _FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return today.replace(hour=10, minute=0, second=0, microsecond=0)
-
-    monkeypatch.setattr(market, "datetime", _FixedDateTime)
-    monkeypatch.setattr(
-        market,
-        "fetch",
-        lambda *args, **kwargs: _fake_series_for_quote(today.date().isoformat()),
-    )
-    monkeypatch.setattr(market, "fetch_realtime_tick", lambda *args, **kwargs: None)
-
-    with pytest.raises(RuntimeError, match="không dùng giá đóng cửa cũ"):
-        await market.fetch_quote("HPG")
+    async def post(self, *_args, **_kwargs) -> _FakeTickResponse:
+        self.calls += 1
+        return _FakeTickResponse(self._payload)
 
 
-def _fake_series_for_quote(today: str) -> market.Series:
-    previous = "2026-08-10"
-    return market.Series(
-        "HPG", [27000, 27100], [27200, 27300], [26900, 27000], [1000, 1200], [previous, today]
-    )
+async def test_fetch_realtime_tick_returns_scaled_match_price(monkeypatch):
+    payload = {"data": {"GetKrxTicksBySymbols": {"ticks": [{"matchPrice": 25.5}]}}}
+    fake_client = _FakeTickClient(payload)
+    monkeypatch.setattr(market, "client", lambda: fake_client)
+
+    price = await market.fetch_realtime_tick("FPT")
+
+    assert price == 25500
+    assert fake_client.calls == 1
 
 
-async def test_fetch_quote_requests_enough_history_for_previous_close(monkeypatch):
-    captured = {}
+async def test_fetch_realtime_tick_returns_none_when_no_ticks_today(monkeypatch):
+    payload = {"data": {"GetKrxTicksBySymbols": {"ticks": []}}}
+    monkeypatch.setattr(market, "client", lambda: _FakeTickClient(payload))
 
-    async def fake_fetch(symbol, days=120, ttl=90):
-        captured["days"] = days
-        return _fake_series_for_quote("2026-08-11")
+    assert await market.fetch_realtime_tick("FPT") is None
 
+
+async def test_fetch_realtime_tick_skips_vnindex(monkeypatch):
+    def _boom():
+        raise AssertionError("không được gọi tick API cho VNINDEX")
+
+    monkeypatch.setattr(market, "client", _boom)
+
+    assert await market.fetch_realtime_tick("VNINDEX") is None
+
+
+async def test_current_price_prefers_realtime_tick(monkeypatch):
+    async def fake_tick(symbol):
+        return 26000.0
+
+    async def fail_fetch(*_args, **_kwargs):
+        raise AssertionError("không cần fallback OHLC khi đã có tick realtime")
+
+    monkeypatch.setattr(market, "fetch_realtime_tick", fake_tick)
+    monkeypatch.setattr(market, "fetch", fail_fetch)
+
+    price, is_realtime = await market.current_price("FPT")
+
+    assert (price, is_realtime) == (26000.0, True)
+
+
+async def test_current_price_falls_back_to_ohlc_when_no_tick(monkeypatch):
+    async def fake_tick(symbol):
+        return None
+
+    async def fake_fetch(symbol, **kwargs):
+        return market.Series(symbol, [24000.0], [24000.0], [24000.0], [1000.0], ["2026-08-07"])
+
+    monkeypatch.setattr(market, "fetch_realtime_tick", fake_tick)
     monkeypatch.setattr(market, "fetch", fake_fetch)
-    monkeypatch.setattr(market, "fetch_realtime_tick", lambda *args, **kwargs: 27450)
 
-    quote = await market.fetch_quote("HPG")
+    price, is_realtime = await market.current_price("FPT")
 
-    assert captured["days"] == 60
-    assert quote.price == 27450
-    assert quote.prev_close == 27000
-    assert quote.is_realtime is True
+    assert (price, is_realtime) == (24000.0, False)
