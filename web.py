@@ -353,18 +353,22 @@ async def _handle_zoom_event(event: ZoomEvent) -> None:
         await _notify_owner_unpaired_zoom_sender(event.sender_jid)
         return
     if not user.active:
-        await send_zoom_message(event.to_jid, "Tài khoản đang bị tạm khóa.")
+        await send_zoom_message(
+            event.to_jid, "Tài khoản đang bị tạm khóa.", user_jid=event.sender_jid
+        )
         return
     command_result = await commands.handle(user, text)
     if command_result is not None:
-        await send_zoom_message(event.to_jid, command_result)
+        await send_zoom_message(event.to_jid, command_result, user_jid=event.sender_jid)
         return
     quote = await commands.try_ticker_quote(text)
     if quote is not None:
-        await send_zoom_message(event.to_jid, quote)
+        await send_zoom_message(event.to_jid, quote, user_jid=event.sender_jid)
         return
     result, provider = await chat(user, text)
-    await send_zoom_message(event.to_jid, f"{result}\n\n⚙️ {provider}")
+    await send_zoom_message(
+        event.to_jid, f"{result}\n\n⚙️ {provider}", user_jid=event.sender_jid
+    )
 
 
 async def _handle_zalo_event(event: ZaloEvent) -> BridgeReply:
