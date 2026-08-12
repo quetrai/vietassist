@@ -159,6 +159,13 @@ async def migrate() -> None:
         ALTER TABLE reminders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
         ALTER TABLE reminders ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ;
         ALTER TABLE reminders ADD COLUMN IF NOT EXISTS last_error TEXT;
+        CREATE TABLE IF NOT EXISTS zoom_users (
+          user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          display_name TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended')),
+          paired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
         CREATE TABLE IF NOT EXISTS zalo_session (
           id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
           cookie_json TEXT NOT NULL,
@@ -516,6 +523,115 @@ async def zalo_enabled_groups() -> list[dict[str, object]]:
     db = await pool()
     rows = await db.fetch("SELECT group_id, alias FROM zalo_groups WHERE enabled")
     return [dict(row) for row in rows]
+
+
+async def _zoom_ensure_user(conn: asyncpg.Connection, external_id: str) -> dict[str, object]:
+    return await conn.fetchrow(
+        """
+        INSERT INTO users(channel, external_id, role)
+        VALUES('zoom', $1, 'user')
+        ON CONFLICT(channel, external_id) DO UPDATE SET channel = users.channel
+        RETURNING id::text, channel, external_id
+        """,
+        external_id,
+    )
+
+
+def _zoom_user_from_rows(user_row: object, zoom_row: object) -> User:
+    # Không có phân biệt admin/user như Zalo (chưa có tính năng nào cần riêng quyền
+    # admin cho Zoom) — mọi Zoom user đã pair đều là Role.USER.
+    return User(
+        user_row["id"],
+        Channel(user_row["channel"]),
+        user_row["external_id"],
+        Role.USER,
+        zoom_row["status"] == "active",
+    )
+
+
+async def zoom_pair(external_id: str, display_name: str = "") -> tuple[User, str]:
+    """Owner Telegram pair một Zoom user mới (hoặc pair lại người đã bị xóa/khóa).
+    Trả kèm display_name thực sự được lưu (giữ tên cũ nếu gọi lại mà không nhập tên mới)."""
+    db = await pool()
+    async with db.acquire() as conn, conn.transaction():
+        user_row = await _zoom_ensure_user(conn, external_id)
+        zoom_row = await conn.fetchrow(
+            """
+            INSERT INTO zoom_users(user_id, display_name, status, paired_at, last_active_at)
+            VALUES($1::uuid, $2, 'active', NOW(), NOW())
+            ON CONFLICT(user_id) DO UPDATE
+              SET status = 'active',
+                  display_name = CASE WHEN EXCLUDED.display_name = ''
+                                       THEN zoom_users.display_name ELSE EXCLUDED.display_name END
+            RETURNING status, display_name
+            """,
+            user_row["id"],
+            display_name,
+        )
+    return _zoom_user_from_rows(user_row, zoom_row), zoom_row["display_name"]
+
+
+async def zoom_set_status(external_id: str, status: str) -> bool:
+    """Khóa (`suspended`) hoặc mở khóa (`active`) một Zoom user đã pair."""
+    db = await pool()
+    result = await db.execute(
+        """
+        UPDATE zoom_users SET status = $2
+        FROM users
+        WHERE users.id = zoom_users.user_id
+          AND users.channel = 'zoom' AND users.external_id = $1
+        """,
+        external_id,
+        status,
+    )
+    return result.endswith("1")
+
+
+async def zoom_delete(external_id: str) -> bool:
+    """Xóa pairing (thu hồi quyền truy cập); lịch sử chat/danh mục của user được giữ nguyên."""
+    db = await pool()
+    result = await db.execute(
+        """
+        DELETE FROM zoom_users USING users
+        WHERE users.id = zoom_users.user_id
+          AND users.channel = 'zoom' AND users.external_id = $1
+        """,
+        external_id,
+    )
+    return result.endswith("1")
+
+
+async def zoom_list_users() -> list[dict[str, object]]:
+    db = await pool()
+    rows = await db.fetch(
+        """
+        SELECT u.external_id, z.display_name, z.status, z.paired_at, z.last_active_at
+        FROM zoom_users z
+        JOIN users u ON u.id = z.user_id
+        ORDER BY z.paired_at ASC
+        """
+    )
+    return [dict(row) for row in rows]
+
+
+async def zoom_lookup(external_id: str) -> User | None:
+    """Tra cứu user Zoom đã pair; trả None nếu chưa từng được owner pair."""
+    db = await pool()
+    row = await db.fetchrow(
+        """
+        SELECT u.id::text AS id, u.channel, u.external_id, z.status
+        FROM users u
+        JOIN zoom_users z ON z.user_id = u.id
+        WHERE u.channel = 'zoom' AND u.external_id = $1
+        """,
+        external_id,
+    )
+    if row is None:
+        return None
+    await db.execute(
+        "UPDATE zoom_users SET last_active_at = NOW() WHERE user_id = $1::uuid", row["id"]
+    )
+    return _zoom_user_from_rows(row, row)
 
 
 async def zalo_save_summary(

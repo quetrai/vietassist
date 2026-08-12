@@ -54,6 +54,12 @@ class Settings:
     zalo_enabled: bool = _boolean("ZALO_ENABLED")
     zalo_control_port: int = _integer("ZALO_CONTROL_PORT", 9901)
     zalo_daily_digest_hour: int = _integer("ZALO_DAILY_DIGEST_HOUR", 21)
+    zoom_enabled: bool = _boolean("ZOOM_ENABLED")
+    zoom_client_id: str = os.getenv("ZOOM_CLIENT_ID", "").strip()
+    zoom_client_secret: str = os.getenv("ZOOM_CLIENT_SECRET", "").strip()
+    zoom_bot_jid: str = os.getenv("ZOOM_BOT_JID", "").strip()
+    zoom_verification_token: str = os.getenv("ZOOM_VERIFICATION_TOKEN", "").strip()
+    zoom_account_id: str = os.getenv("ZOOM_ACCOUNT_ID", "").strip()
     stock_cache_ttl_sec: int = _integer("STOCK_CACHE_TTL_SEC", 90)
     knowledge_base_dir: str = os.getenv("KNOWLEDGE_BASE_DIR", "knowledge").strip()
     # File tham chiếu văn phong dịch Nhật-Việt cho lệnh /dich — KHÔNG đặt trong
@@ -79,6 +85,16 @@ class Settings:
         if self.zalo_enabled:
             required.update(
                 {"BRIDGE_SECRET": self.bridge_secret, "SETTINGS_ENC_KEY": self.settings_enc_key}
+            )
+        if self.zoom_enabled:
+            required.update(
+                {
+                    "ZOOM_CLIENT_ID": self.zoom_client_id,
+                    "ZOOM_CLIENT_SECRET": self.zoom_client_secret,
+                    "ZOOM_BOT_JID": self.zoom_bot_jid,
+                    "ZOOM_VERIFICATION_TOKEN": self.zoom_verification_token,
+                    "ZOOM_ACCOUNT_ID": self.zoom_account_id,
+                }
             )
         missing = [name for name, value in required.items() if not value]
         if missing:

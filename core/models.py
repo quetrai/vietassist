@@ -7,6 +7,7 @@ from enum import StrEnum
 class Channel(StrEnum):
     TELEGRAM = "telegram"
     ZALO = "zalo"
+    ZOOM = "zoom"
 
 
 class Role(StrEnum):
