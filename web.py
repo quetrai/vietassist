@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import hmac
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,9 +20,10 @@ from ai import router
 from ai.contracts import ProviderError, ProviderUnavailable
 from bot import build_application
 from channels.zalo import ZaloEvent, download_image, is_group_command, resolve_user, summarize_group
-from channels.zoom import ZoomEvent, parse_event as parse_zoom_event
+from channels.zoom import ZoomEvent, build_url_validation_response, parse_event as parse_zoom_event
 from channels.zoom import resolve_user as resolve_zoom_user
 from channels.zoom import send_message as send_zoom_message
+from channels.zoom import verify_webhook_signature as verify_zoom_webhook_signature
 from channels.zoom import verify_webhook_token as verify_zoom_webhook_token
 from core import database, knowledge
 from core.config import settings
@@ -193,9 +195,33 @@ async def webhook(request: Request) -> Response:
 async def webhook_zoom(request: Request) -> Response:
     if not settings.zoom_enabled:
         raise HTTPException(404)
-    if not verify_zoom_webhook_token(request.headers.get("authorization", "")):
-        raise HTTPException(403)
+    raw_body = await request.body()
     payload = await request.json()
+
+    # Bước "Validate" trên Marketplace: Zoom POST event endpoint.url_validation kèm
+    # plainToken, KHÔNG kèm chữ ký — phải trả lại encryptedToken để xác thực endpoint.
+    # Xử lý riêng trước khi check chữ ký, vì request này chưa có x-zm-signature hợp lệ.
+    if payload.get("event") == "endpoint.url_validation":
+        plain_token = payload.get("payload", {}).get("plainToken", "")
+        if not plain_token or not settings.zoom_secret_token:
+            raise HTTPException(400)
+        return Response(
+            content=json.dumps(build_url_validation_response(plain_token)),
+            media_type="application/json",
+        )
+
+    authorized = False
+    if settings.zoom_secret_token:
+        authorized = verify_zoom_webhook_signature(
+            request.headers.get("x-zm-signature", ""),
+            request.headers.get("x-zm-request-timestamp", ""),
+            raw_body,
+        )
+    elif settings.zoom_verification_token:
+        authorized = verify_zoom_webhook_token(request.headers.get("authorization", ""))
+    if not authorized:
+        raise HTTPException(403)
+
     event = parse_zoom_event(payload)
     if event is None:
         # Sự kiện không phải tin nhắn/slash command (vd bot bị thêm vào channel) — bỏ
