@@ -20,7 +20,7 @@ from ai import router
 from core import database, knowledge
 from core.config import settings
 from core.models import Channel, Role, User
-from services import commands, zalo_admin, zalo_login
+from services import commands, zalo_admin, zalo_login, zoom_admin
 from services.chat import chat
 from services.prompt_engine import build_image_prompt_instruction
 from services.tg_format import reply_rich
@@ -39,6 +39,14 @@ ZALO_ADMIN_COMMANDS = {
 }
 ZALO_ADMIN_COMMANDS_WITH_NAME = {"zalopair", "zaloadmin"}
 
+ZOOM_ADMIN_COMMANDS = {
+    "zoompair": zoom_admin.pair,
+    "zoomkhoa": zoom_admin.lock,
+    "zoommokhoa": zoom_admin.unlock,
+    "zoomxoa": zoom_admin.remove,
+}
+ZOOM_ADMIN_COMMANDS_WITH_NAME = {"zoompair"}
+
 
 async def telegram_user(update: Update) -> User:
     assert update.effective_user is not None
@@ -48,7 +56,8 @@ async def telegram_user(update: Update) -> User:
 
 
 def parse_zalo_admin_args(text: str) -> tuple[str, str]:
-    """Tách `/lệnh <id_zalo> [tên...]` thành (external_id, tên hiển thị)."""
+    """Tách `/lệnh <id> [tên...]` thành (external_id, tên hiển thị) — dùng chung cho cả
+    lệnh quản trị Zalo và Zoom (chỉ tách chuỗi theo khoảng trắng, không phụ thuộc kênh)."""
     _, _, rest = text.strip().partition(" ")
     external_id, _, name = rest.strip().partition(" ")
     return external_id, name.strip()
@@ -57,6 +66,7 @@ def parse_zalo_admin_args(text: str) -> tuple[str, str]:
 _SPECIAL_COMMANDS_HELP = [
     "Gửi ảnh kèm mô tả để chuyển ảnh thành prompt.",
     "Quản trị Zalo: /zalopair, /zaloadmin, /zalokhoa, /zalomokhoa, /zaloxoa, /zalodanhsach.",
+    "Quản trị Zoom: /zoompair, /zoomkhoa, /zoommokhoa, /zoomxoa, /zoomdanhsach.",
     "Đăng nhập Zalo B: /zalologin (sinh mã QR gửi ngay tại đây, quét bằng app Zalo B).",
     "Knowledge base: /kbreindex (tính lại embedding sau khi cập nhật tài liệu .md), "
     "/rag on|off (bật/tắt tra cứu — gõ /rag suông để bấm nút).",
@@ -112,6 +122,11 @@ _MENU_DESCRIPTIONS: dict[str, str] = {
     "zalodanhsach": "Xem danh sách người dùng Zalo đã pair",
     "zalologin": "Đăng nhập Zalo B qua mã QR",
     "kbreindex": "Tính lại embedding knowledge base",
+    "zoompair": "Cấp quyền cho 1 người dùng Zoom",
+    "zoomkhoa": "Khoá 1 người dùng Zoom",
+    "zoommokhoa": "Mở khoá 1 người dùng Zoom",
+    "zoomxoa": "Xoá quyền 1 người dùng Zoom",
+    "zoomdanhsach": "Xem danh sách người dùng Zoom đã pair",
 }
 
 # Thứ tự cố định (không dùng dict.keys() của COMMANDS/ZALO_ADMIN_COMMANDS trực
@@ -124,13 +139,20 @@ _MENU_ORDER: list[str] = [
     "rag", "start",
     "zalopair", "zaloadmin", "zalokhoa", "zalomokhoa", "zaloxoa", "zalodanhsach",
     "zalologin", "kbreindex",
+    "zoompair", "zoomkhoa", "zoommokhoa", "zoomxoa", "zoomdanhsach",
 ]
 
 
 def _bot_commands() -> list[BotCommand]:
-    known = set(commands.COMMANDS) | {f"/{name}" for name in ZALO_ADMIN_COMMANDS} | {
-        "/zalodanhsach", "/zalologin", "/kbreindex", "/start", "/help",
-    }
+    known = (
+        set(commands.COMMANDS)
+        | {f"/{name}" for name in ZALO_ADMIN_COMMANDS}
+        | {f"/{name}" for name in ZOOM_ADMIN_COMMANDS}
+        | {
+            "/zalodanhsach", "/zalologin", "/kbreindex", "/start", "/help",
+            "/zoomdanhsach",
+        }
+    )
     ordered = [f"/{name}" for name in _MENU_ORDER]
     # An toàn cho tương lai: lệnh mới thêm vào COMMANDS mà quên cập nhật
     # _MENU_ORDER vẫn xuất hiện trong menu (cuối danh sách) thay vì âm thầm biến mất.
@@ -218,6 +240,25 @@ async def zalo_manage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def zalo_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(await zalo_admin.list_users())
+
+
+async def call_zoom_admin_handler(cmd: str, external_id: str, name: str) -> str:
+    handler = ZOOM_ADMIN_COMMANDS[cmd]
+    if cmd in ZOOM_ADMIN_COMMANDS_WITH_NAME:
+        return await handler(external_id, name)
+    return await handler(external_id)
+
+
+async def zoom_manage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.effective_message.text or ""
+    cmd = text.strip().partition(" ")[0].lower().lstrip("/")
+    external_id, name = parse_zalo_admin_args(text)
+    result = await call_zoom_admin_handler(cmd, external_id, name)
+    await update.effective_message.reply_text(result)
+
+
+async def zoom_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(await zoom_admin.list_users())
 
 
 async def zalo_login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -357,6 +398,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("zalodanhsach", zalo_list, filters=owner))
     app.add_handler(CommandHandler("zalologin", zalo_login_start, filters=owner))
     app.add_handler(CommandHandler("kbreindex", kb_reindex, filters=owner))
+    for name in ZOOM_ADMIN_COMMANDS:
+        app.add_handler(CommandHandler(name, zoom_manage, filters=owner))
+    app.add_handler(CommandHandler("zoomdanhsach", zoom_list, filters=owner))
     app.add_handler(CallbackQueryHandler(rag_toggle_callback, pattern=r"^rag:(on|off)$"))
     app.add_handler(MessageHandler(owner & (filters.PHOTO | filters.Document.IMAGE), image))
     app.add_handler(MessageHandler(owner & filters.TEXT & ~filters.COMMAND, message))

@@ -19,6 +19,10 @@ from ai import router
 from ai.contracts import ProviderError, ProviderUnavailable
 from bot import build_application
 from channels.zalo import ZaloEvent, download_image, is_group_command, resolve_user, summarize_group
+from channels.zoom import ZoomEvent, parse_event as parse_zoom_event
+from channels.zoom import resolve_user as resolve_zoom_user
+from channels.zoom import send_message as send_zoom_message
+from channels.zoom import verify_webhook_token as verify_zoom_webhook_token
 from core import database, knowledge
 from core.config import settings
 from core.models import Channel, User
@@ -185,6 +189,34 @@ async def webhook(request: Request) -> Response:
     return Response(status_code=200)
 
 
+@app.post("/webhook/zoom")
+async def webhook_zoom(request: Request) -> Response:
+    if not settings.zoom_enabled:
+        raise HTTPException(404)
+    if not verify_zoom_webhook_token(request.headers.get("authorization", "")):
+        raise HTTPException(403)
+    payload = await request.json()
+    event = parse_zoom_event(payload)
+    if event is None:
+        # Sự kiện không phải tin nhắn/slash command (vd bot bị thêm vào channel) — bỏ
+        # qua êm, không phải lỗi.
+        return Response(status_code=200)
+    lease_token = await database.claim_event(Channel.ZOOM, event.event_id)
+    if lease_token is None:
+        return Response(status_code=200)
+    try:
+        await _handle_zoom_event(event)
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await database.fail_event(
+                Channel.ZOOM, event.event_id, lease_token, f"{type(exc).__name__}: {exc}"
+            )
+        logger.exception("Zoom event %s failed", event.event_id)
+        raise HTTPException(503, "Temporary processing failure") from exc
+    await database.complete_event(Channel.ZOOM, event.event_id, lease_token)
+    return Response(status_code=200)
+
+
 @app.post("/bridge/events", response_model=BridgeReply)
 async def bridge_event(
     payload: BridgeEvent, x_bridge_secret: str = Header(default="")
@@ -270,6 +302,43 @@ async def _notify_owner_unpaired_sender(sender_id: str, sender_name: str) -> Non
     )
     with contextlib.suppress(Exception):
         await telegram.bot.send_message(chat_id=settings.telegram_owner_id, text=text)
+
+
+async def _notify_owner_unpaired_zoom_sender(sender_jid: str) -> None:
+    if not sender_jid or sender_jid in _notified_unpaired_senders:
+        return
+    if telegram is None or not settings.telegram_owner_id:
+        return
+    _notified_unpaired_senders.add(sender_jid)
+    text = (
+        f"🔔 Zoom jid={sender_jid} vừa nhắn cho bot nhưng chưa được cấp quyền.\n"
+        f"Dùng /zoompair {sender_jid} để cấp quyền."
+    )
+    with contextlib.suppress(Exception):
+        await telegram.bot.send_message(chat_id=settings.telegram_owner_id, text=text)
+
+
+async def _handle_zoom_event(event: ZoomEvent) -> None:
+    text = event.text.strip()
+    user = await resolve_zoom_user(event.sender_jid)
+    if user is None:
+        # Chưa pair: im lặng với sender (không lộ ra là bot chưa cấu hình xong), chỉ
+        # âm thầm báo cho Telegram owner, giống hệt nguyên tắc của kênh Zalo.
+        await _notify_owner_unpaired_zoom_sender(event.sender_jid)
+        return
+    if not user.active:
+        await send_zoom_message(event.to_jid, "Tài khoản đang bị tạm khóa.")
+        return
+    command_result = await commands.handle(user, text)
+    if command_result is not None:
+        await send_zoom_message(event.to_jid, command_result)
+        return
+    quote = await commands.try_ticker_quote(text)
+    if quote is not None:
+        await send_zoom_message(event.to_jid, quote)
+        return
+    result, provider = await chat(user, text)
+    await send_zoom_message(event.to_jid, f"{result}\n\n⚙️ {provider}")
 
 
 async def _handle_zalo_event(event: ZaloEvent) -> BridgeReply:
