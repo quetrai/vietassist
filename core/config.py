@@ -58,7 +58,13 @@ class Settings:
     zoom_client_id: str = os.getenv("ZOOM_CLIENT_ID", "").strip()
     zoom_client_secret: str = os.getenv("ZOOM_CLIENT_SECRET", "").strip()
     zoom_bot_jid: str = os.getenv("ZOOM_BOT_JID", "").strip()
+    # ZOOM_VERIFICATION_TOKEN: cơ chế xác thực CŨ (app kiểu "General App + Chatbot"
+    # quickstart) — header Authorization so khớp trực tiếp, không dùng chữ ký.
     zoom_verification_token: str = os.getenv("ZOOM_VERIFICATION_TOKEN", "").strip()
+    # ZOOM_SECRET_TOKEN: cơ chế MỚI (Access > Token > Secret Token trên Marketplace,
+    # đi cùng Event Subscriptions) — Zoom ký payload bằng HMAC-SHA256 và gửi qua header
+    # x-zm-signature/x-zm-request-timestamp. Đây là cơ chế app hiện đang dùng.
+    zoom_secret_token: str = os.getenv("ZOOM_SECRET_TOKEN", "").strip()
     zoom_account_id: str = os.getenv("ZOOM_ACCOUNT_ID", "").strip()
     stock_cache_ttl_sec: int = _integer("STOCK_CACHE_TTL_SEC", 90)
     knowledge_base_dir: str = os.getenv("KNOWLEDGE_BASE_DIR", "knowledge").strip()
@@ -92,13 +98,17 @@ class Settings:
                     "ZOOM_CLIENT_ID": self.zoom_client_id,
                     "ZOOM_CLIENT_SECRET": self.zoom_client_secret,
                     "ZOOM_BOT_JID": self.zoom_bot_jid,
-                    "ZOOM_VERIFICATION_TOKEN": self.zoom_verification_token,
                     "ZOOM_ACCOUNT_ID": self.zoom_account_id,
                 }
             )
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise RuntimeError("Thiếu cấu hình: " + ", ".join(missing))
+        if self.zoom_enabled and not (self.zoom_secret_token or self.zoom_verification_token):
+            raise RuntimeError(
+                "Thiếu cấu hình: ZOOM_SECRET_TOKEN (hoặc ZOOM_VERIFICATION_TOKEN nếu dùng "
+                "cơ chế xác thực cũ) — cần ít nhất một trong hai để verify webhook Zoom."
+            )
         ranges = {
             "TELEGRAM_OWNER_ID": (1, None, self.telegram_owner_id),
             "AI_TIMEOUT_SEC": (1, 300, self.ai_timeout_sec),
