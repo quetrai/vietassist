@@ -112,11 +112,12 @@ async def _access_token() -> str:
 _MAX_MESSAGE_CHARS = 4096  # Gioi han cua Zoom Team Chat cho 1 tin nhan (docs Zoom).
 
 
-async def _post_message(to_jid: str, text: str) -> None:
+async def _post_message(to_jid: str, text: str, user_jid: str) -> None:
     token = await _access_token()
     body = {
         "robot_jid": settings.zoom_bot_jid,
         "to_jid": to_jid,
+        "user_jid": user_jid,
         "account_id": settings.zoom_account_id,
         "content": {"body": [{"type": "message", "text": text}]},
     }
@@ -136,11 +137,16 @@ async def _post_message(to_jid: str, text: str) -> None:
     response.raise_for_status()
 
 
-async def send_message(to_jid: str, text: str) -> None:
+async def send_message(to_jid: str, text: str, user_jid: str | None = None) -> None:
+    # user_jid (JID cua nguoi bot dang gui thay mat) la truong BAT BUOC theo Zoom
+    # Chatbot API - thieu no Zoom tra ve 400 "Invalid request body format" (code 7001).
+    # Mac dinh dung to_jid khi khong co user_jid rieng (vi du chat 1:1, to_jid chinh la
+    # sender).
+    effective_user_jid = user_jid or to_jid
     # Zoom Team Chat tu choi (400) neu 1 tin nhan vuot qua 4096 ky tu. Cat nho thanh
     # nhieu tin thay vi gui nguyen mot khoi dai (vi du cau tra loi AI dai).
     for i in range(0, len(text), _MAX_MESSAGE_CHARS):
-        await _post_message(to_jid, text[i : i + _MAX_MESSAGE_CHARS])
+        await _post_message(to_jid, text[i : i + _MAX_MESSAGE_CHARS], effective_user_jid)
 
 
 def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
