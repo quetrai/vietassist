@@ -46,12 +46,25 @@ class AIRouter:
         self.google = GoogleProvider(
             settings.google_api_key, settings.google_model, settings.google_max_concurrency
         )
+        # 9Router — chỉ được ưu tiên khi gọi text() với prefer_router9=True (tức user đã
+        # /ai on). Luôn khởi tạo giống các provider khác; nếu thiếu ROUTER9_API_KEY,
+        # provider.generate() tự raise ProviderUnavailable và rơi xuống fallback bình
+        # thường, không cần kiểm tra riêng ở đây.
+        self.router9 = OpenAICompatibleProvider(
+            name="router9",
+            base_url=settings.router9_base_url,
+            api_key=settings.router9_api_key,
+            model=settings.router9_model,
+            timeout=settings.ai_timeout_sec,
+            concurrency=settings.router9_max_concurrency,
+        )
 
     async def close(self) -> None:
         await self.groq.close()
         await self.groq_realtime.close()
         await self.openrouter.close()
         await self.google.close()
+        await self.router9.close()
 
     async def text(
         self,
@@ -60,9 +73,14 @@ class AIRouter:
         *,
         system: str,
         temperature: float = 0.5,
+        prefer_router9: bool = False,
     ) -> AIResponse:
         errors: list[str] = []
-        for provider in (self.groq, self.openrouter, getattr(self, "google", None)):
+        providers: list[Any] = []
+        if prefer_router9:
+            providers.append(getattr(self, "router9", None))
+        providers.extend([self.groq, self.openrouter, getattr(self, "google", None)])
+        for provider in providers:
             if provider is None:
                 continue
             try:
