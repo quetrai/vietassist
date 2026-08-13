@@ -10,6 +10,8 @@ async def pair(external_id: str, display_name: str) -> str:
         return "Cú pháp: /zoompair <jid_zoom> [tên hiển thị]"
     _, saved_name = await database.zoom_pair(external_id, display_name)
     ten = saved_name or "không tên"
+    # Zoom chỉ dùng cho 1 người nên pair xong là dùng được ngay mọi lệnh (kể cả
+    # /nhom, /tongket, /dangnoi) — không cần thêm bước cấp quyền admin riêng như Zalo.
     return f"Đã pair {external_id} ({ten})."
 
 

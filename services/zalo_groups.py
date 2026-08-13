@@ -17,8 +17,18 @@ async def list_groups() -> str:
 
 def _format_group(row: dict[str, object]) -> str:
     trang_thai = "bật" if row["enabled"] else "tắt"
-    alias = f" (alias: {row['alias']})" if row["alias"] else ""
-    return f"{row['group_id']}{alias} — {trang_thai}"
+    # Ưu tiên alias admin tự đặt (/themnhom); nếu chưa có, dùng tên nhóm thật lấy
+    # tự động từ Zalo (group_name, xem zalo_register_group) để vẫn hiện tên thân
+    # thiện thay vì group_id trần.
+    alias = row.get("alias")
+    group_name = row.get("group_name")
+    if alias:
+        label = f" (alias: {alias})"
+    elif group_name:
+        label = f" (tên: {group_name})"
+    else:
+        label = ""
+    return f"{row['group_id']}{label} — {trang_thai}"
 
 
 async def add_group(group_id: str, alias: str) -> str:

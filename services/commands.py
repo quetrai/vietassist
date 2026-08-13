@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from ai import router
 from ai.contracts import GroundingUnavailable, ProviderError
-from channels.zalo import summarize_group
+from channels.zalo import summarize_group, today_discussion
 from core import database
 from core.models import User
 from services import portfolio, reminders, translate as translate_service, zalo_groups
@@ -222,6 +222,24 @@ async def _cmd_tongket(user: User, argument: str) -> str:
     return await summarize_group(user, parts[0], parts[1] if len(parts) > 1 else "24h")
 
 
+async def _cmd_dangnoi(user: User, argument: str) -> str:
+    # Giống /tongket về nguyên tắc dùng chéo kênh, nhưng trả nguyên văn tin nhắn
+    # trong ngày (giờ VN) thay vì bản tóm tắt AI - today_discussion() tự kiểm tra
+    # can_use_group_summary bên trong.
+    parts = argument.split()
+    if not parts:
+        return "Cú pháp: /dangnoi <nhóm> — xem nguyên văn thảo luận trong ngày hôm nay"
+    return await today_discussion(user, parts[0])
+
+
+async def _cmd_help(user: User, argument: str) -> str:
+    lines = ["📖 Danh sách lệnh:", ""]
+    lines.extend(entry.help for entry in COMMANDS.values())
+    lines.append("")
+    lines.append("Mẹo: gõ đúng 3 chữ cái (vd FPT) để tra nhanh giá, không cần gõ /quote.")
+    return "\n".join(lines)
+
+
 COMMANDS: dict[str, Command] = {
     "/gia": Command(_cmd_gia, "/gia <sản phẩm> — tra giá bán hiện tại"),
     "/prompt": Command(_cmd_prompt, "/prompt <mô tả ảnh> — viết prompt tạo ảnh"),
@@ -271,6 +289,12 @@ COMMANDS: dict[str, Command] = {
         "/tongket <nhóm> [24h|7d] — nhóm Zalo đang thảo luận gì (tóm tắt AI, chỉ admin), "
         "dùng được cả từ Zoom/Telegram",
     ),
+    "/dangnoi": Command(
+        _cmd_dangnoi,
+        "/dangnoi <nhóm> — xem nguyên văn thảo luận trong ngày hôm nay của nhóm Zalo "
+        "(không qua AI tóm tắt, chỉ admin), dùng được cả từ Zoom/Telegram",
+    ),
+    "/help": Command(_cmd_help, "/help — xem danh sách lệnh"),
 }
 
 
