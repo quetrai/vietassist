@@ -24,7 +24,7 @@ class User:
     external_id: str
     role: Role
     active: bool = True
-    rag_enabled: bool = True
+    rag_enabled: bool = False
 
     @property
     def can_use_group_summary(self) -> bool:

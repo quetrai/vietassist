@@ -48,11 +48,11 @@ async def migrate() -> None:
           external_id TEXT NOT NULL,
           role TEXT NOT NULL DEFAULT 'user',
           active BOOLEAN NOT NULL DEFAULT TRUE,
-          rag_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          rag_enabled BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE(channel, external_id)
         );
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS rag_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS rag_enabled BOOLEAN NOT NULL DEFAULT FALSE;
         CREATE TABLE IF NOT EXISTS chat_messages (
           id BIGSERIAL PRIMARY KEY,
           user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -251,7 +251,8 @@ async def get_or_create_user(channel: Channel, external_id: str, role: Role) -> 
 
 
 async def set_rag_enabled(user_id: str, enabled: bool) -> None:
-    """Bật/tắt tra cứu knowledge base (RAG) riêng cho 1 user. Khi tắt, chat() bỏ hẳn bước
+    """Bật/tắt tra cứu knowledge base (RAG) riêng cho 1 user. Khi tắt (mặc định với user
+    mới, xem cột rag_enabled ở trên), chat() bỏ hẳn bước
     gọi Google Embedding API + search_knowledge cho user đó — dùng khi chỉ chat phiếm,
     không cần tra tài liệu, để tiết kiệm quota."""
     db = await pool()
