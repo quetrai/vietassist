@@ -47,20 +47,6 @@ class ZoomEvent:
         return self.to_jid if self.channel_name else self.sender_jid
 
 
-@dataclass(frozen=True)
-class ZoomInteraction:
-    event_id: str
-    sender_jid: str
-    action: str
-    to_jid: str
-    channel_name: str = ""
-    account_id: str = ""
-
-    @property
-    def reply_jid(self) -> str:
-        return self.to_jid if self.channel_name else self.sender_jid
-
-
 def verify_webhook_token(authorization_header: str) -> bool:
     """Xác thực webhook Zoom gửi tới bằng Verification Token CU (header Authorization ==
     ZOOM_VERIFICATION_TOKEN nguyen van, KHONG co tien to "Bearer "). Chi dung cho app kieu
@@ -231,61 +217,6 @@ async def send_message(
         )
 
 
-async def _post_content(to_jid: str, content: dict[str, object], user_jid: str, account_id: str) -> None:
-    token = await _access_token()
-    body = {
-        "robot_jid": settings.zoom_bot_jid,
-        "to_jid": to_jid,
-        "user_jid": user_jid,
-        "account_id": account_id,
-        "is_markdown_support": True,
-        "content": content,
-    }
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        response = await client.post(
-            _MESSAGE_URL, json=body, headers={"Authorization": f"Bearer {token}"}
-        )
-    if response.status_code >= 400:
-        logger.error(
-            "Zoom send card failed (%s) to_jid=%s user_jid=%s account_id=%s: %s",
-            response.status_code, to_jid, user_jid, account_id, response.text,
-        )
-    response.raise_for_status()
-
-
-async def send_card(
-    to_jid: str, content: dict[str, object], user_jid: str | None = None, account_id: str | None = None
-) -> None:
-    await _post_content(to_jid, content, user_jid or to_jid, account_id or settings.zoom_account_id)
-
-
-def parse_interaction(payload: dict[str, object]) -> ZoomInteraction | None:
-    event_payload = payload.get("payload")
-    if not isinstance(event_payload, dict):
-        return None
-    if payload.get("event") not in {"interactive_message_actions", "interactive_message_select"}:
-        return None
-    action_item = event_payload.get("actionItem")
-    action = ""
-    if isinstance(action_item, dict):
-        action = str(action_item.get("value") or "").strip()
-    if not action:
-        selected = event_payload.get("selectedItems")
-        if isinstance(selected, list) and selected and isinstance(selected[0], dict):
-            action = str(selected[0].get("value") or "").strip()
-    sender_jid = str(event_payload.get("userJid") or event_payload.get("user_jid") or "").strip()
-    to_jid = str(event_payload.get("toJid") or event_payload.get("to_jid") or sender_jid).strip()
-    channel_name = str(event_payload.get("channelName") or event_payload.get("channel_name") or "").strip()
-    account_id = str(event_payload.get("accountId") or event_payload.get("account_id") or "").strip()
-    event_id = str(
-        event_payload.get("messageId")
-        or event_payload.get("message_id")
-        or f"{sender_jid}:{event_payload.get('timestamp') or payload.get('event_ts', '')}:{action}"
-    ).strip()
-    if not sender_jid or not action or not event_id:
-        return None
-    return ZoomInteraction(event_id, sender_jid, action, to_jid, channel_name, account_id)
-
 def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
     """Rút sự kiện tin nhắn/slash command từ webhook payload Zoom.
 
@@ -300,10 +231,6 @@ def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
     text = str(
         event_payload.get("cmd") or event_payload.get("message") or event_payload.get("content") or ""
     ).strip()
-    # Zoom sends only the text after the configured Slash Command. Internally VietAssist
-    # keeps its existing slash-command router, so normalize "stock FPT" to "/stock FPT".
-    if text and not text.startswith("/"):
-        text = "/" + text
     sender_jid = str(
         event_payload.get("userJid") or event_payload.get("user_jid") or ""
     ).strip()
@@ -325,7 +252,7 @@ def parse_event(payload: dict[str, object]) -> ZoomEvent | None:
         or event_payload.get("message_id")
         or f"{sender_jid}:{payload.get('event_ts', '')}"
     ).strip()
-    if not sender_jid or not event_id:
+    if not sender_jid or not text or not event_id:
         return None
     return ZoomEvent(event_id, sender_jid, text, to_jid, channel_name, account_id)
 
