@@ -160,7 +160,9 @@ async def chat(user: User, text: str) -> tuple[str, str]:
             messages = [*history, {"role": "user", "content": text}]
             memory_context = await memory.build_memory_context(user.id)
             system = await _system_with_knowledge(text, rag_enabled=user.rag_enabled, memory_context=memory_context)
-            response = await router.text(TaskType.CHAT, messages, system=system)
+            response = await router.text(
+                TaskType.CHAT, messages, system=system, prefer_router9=user.ai_router_enabled
+            )
 
         await database.add_message(user.id, "user", text)
         await database.add_message(user.id, "assistant", response.text)

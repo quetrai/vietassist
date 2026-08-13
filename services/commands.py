@@ -7,8 +7,10 @@ from ai import router
 from ai.contracts import GroundingUnavailable, ProviderError
 from channels.zalo import summarize_group, today_discussion
 from core import database
+from core.config import settings
 from core.models import User
-from services import portfolio, reminders, translate as translate_service, zalo_groups
+from services import portfolio, reminders, zalo_groups
+from services import translate as translate_service
 from services.chat import text_to_prompt
 from services.prompt_engine import prompt_spec
 from stock import analyze_symbol, quick_quote
@@ -193,6 +195,22 @@ async def _cmd_rag(user: User, argument: str) -> str:
     return f"Trạng thái RAG hiện tại: {status}\nCú pháp: /rag on | /rag off"
 
 
+async def _cmd_ai(user: User, argument: str) -> str:
+    choice = argument.strip().lower()
+    if choice in {"on", "bat", "bật"}:
+        await database.set_ai_router_enabled(user.id, True)
+        return (
+            f"✅ Đã đặt {settings.router9_model} (9Router) làm model mặc định cho chat tự do. "
+            "Vẫn tự động chuyển sang Groq/OpenRouter/Google nếu 9Router lỗi. Tra cứu "
+            "(/gia, /vimo) và ảnh vẫn dùng Google như cũ, không đổi."
+        )
+    if choice in {"off", "tat", "tắt"}:
+        await database.set_ai_router_enabled(user.id, False)
+        return "🚫 Đã tắt. Chat tự do dùng lại đúng thứ tự provider mặc định như trước."
+    status = "BẬT ✅" if user.ai_router_enabled else "TẮT 🚫"
+    return f"Trạng thái 9Router cho chat: {status}\nCú pháp: /ai on | /ai off"
+
+
 async def _cmd_nhomzalo(user: User, argument: str) -> str:
     if not user.can_use_group_summary:
         return _GROUP_FEATURE_DENIED
@@ -270,6 +288,11 @@ COMMANDS: dict[str, Command] = {
     ),
     "/danhmuc": Command(_cmd_danhmuc, "/danhmuc — xem danh mục"),
     "/rag": Command(_cmd_rag, "/rag [on|off] — bật/tắt tra cứu knowledge base cho chat"),
+    "/ai": Command(
+        _cmd_ai,
+        "/ai [on|off] — bật/tắt dùng 9Router làm model mặc định cho chat tự do "
+        "(tra cứu/ảnh vẫn dùng Google, tự fallback nếu lỗi)",
+    ),
     "/nhom": Command(
         _cmd_nhomzalo,
         "/nhom — xem danh sách nhóm Zalo đã bật allowlist (chỉ admin)",
