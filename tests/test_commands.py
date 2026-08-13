@@ -344,4 +344,49 @@ async def test_tongket_permission_check_delegated_to_summarize_group(monkeypatch
     monkeypatch.setattr(commands, "summarize_group", fake_summarize_group)
     result = await commands.handle(_NORMAL_ZOOM, "/tongket vip")
     assert captured["called"] is True
-    assert "chỉ dành cho quản trị viên" in result
+
+
+async def test_dangnoi_syntax_hint_when_no_argument():
+    result = await commands.handle(_ADMIN_ZOOM, "/dangnoi")
+    assert "Cú pháp" in result
+
+
+async def test_dangnoi_from_zoom_delegates_to_today_discussion(monkeypatch):
+    """/dangnoi dùng chéo kênh giống /tongket: gọi được từ Zoom, không chỉ từ trong
+    group chat Zalo (xem comment tại _cmd_dangnoi)."""
+    captured = {}
+
+    async def fake_today_discussion(user, alias):
+        captured.update(user=user, alias=alias)
+        return "💬 Thảo luận hôm nay..."
+
+    monkeypatch.setattr(commands, "today_discussion", fake_today_discussion)
+    result = await commands.handle(_ADMIN_ZOOM, "/dangnoi vip")
+    assert result == "💬 Thảo luận hôm nay..."
+    assert captured == {"user": _ADMIN_ZOOM, "alias": "vip"}
+
+
+async def test_dangnoi_permission_check_delegated_to_today_discussion(monkeypatch):
+    """Giống /tongket: quyền được kiểm bên trong today_discussion(), không tự chặn ở
+    commands.py, để tránh 2 nơi rớt ra 2 thông báo khác nhau."""
+    captured = {}
+
+    async def fake_today_discussion(user, alias):
+        captured["called"] = True
+        return "Tính năng tổng kết nhóm chỉ dành cho quản trị viên."
+
+    monkeypatch.setattr(commands, "today_discussion", fake_today_discussion)
+    result = await commands.handle(_NORMAL_ZOOM, "/dangnoi vip")
+    assert captured["called"] is True
+
+
+async def test_help_lists_every_registered_command():
+    result = await commands.handle(_ADMIN_ZOOM, "/help")
+    for cmd in commands.COMMANDS:
+        assert cmd in result
+
+
+async def test_help_works_on_zalo_too():
+    zalo_user = User("u3", Channel.ZALO, "zaloid1", Role.USER)
+    result = await commands.handle(zalo_user, "/help")
+    assert "/stock" in result

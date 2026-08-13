@@ -33,6 +33,33 @@ async def test_list_groups_formats_enabled_and_alias(monkeypatch):
     assert "g2 — tắt" in result
 
 
+def test_format_group_falls_back_to_auto_fetched_name_without_alias():
+    """/nhom trước đây chỉ hiện group_id trần khi chưa có alias thủ công (/themnhom);
+    giờ dùng group_name lấy tự động từ Zalo (xem zalo_register_group) làm tên hiển thị
+    thay thế, để admin biết đây là nhóm nào ngay từ lần đầu bot thấy tin nhắn."""
+    row = {
+        "group_id": "g3",
+        "alias": None,
+        "group_name": "Nhóm Đầu Tư ABC",
+        "enabled": True,
+        "created_at": None,
+    }
+    result = zalo_groups._format_group(row)
+    assert result == "g3 (tên: Nhóm Đầu Tư ABC) — bật"
+
+
+def test_format_group_prefers_manual_alias_over_auto_fetched_name():
+    row = {
+        "group_id": "g4",
+        "alias": "nhom-vip",
+        "group_name": "Tên gốc trên Zalo",
+        "enabled": True,
+        "created_at": None,
+    }
+    result = zalo_groups._format_group(row)
+    assert result == "g4 (alias: nhom-vip) — bật"
+
+
 async def test_add_group_success(monkeypatch):
     calls = []
 
