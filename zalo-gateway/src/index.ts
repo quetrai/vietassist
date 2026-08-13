@@ -168,7 +168,34 @@ interface ZaloApi {
     start(): void;
   };
   getOwnId(): string | number;
+  getGroupInfo(groupId: string | string[]): Promise<{
+    gridInfoMap: Record<string, {name?: string}>;
+  }>;
   sendMessage(payload: {msg: string; styles?: ZaloStyle[]}, threadId: string, type: ThreadType): Promise<unknown>;
+}
+
+// Cache tên nhóm Zalo theo threadId, tránh gọi getGroupInfo() lại cho mỗi tin
+// nhắn (rate limit + tốn thời gian). Bot chỉ cần tên nhóm để hiển thị thân
+// thiện ở /nhom bên Python, không cần realtime tuyệt đối - refresh theo TTL
+// là đủ, vẫn bắt được khi ai đó đổi tên nhóm sau một thời gian.
+const _GROUP_NAME_TTL_MS = 6 * 60 * 60 * 1000; // 6 giờ
+const groupNameCache = new Map<string, {name: string; fetchedAt: number}>();
+
+async function resolveGroupName(api: ZaloApi, threadId: string): Promise<string> {
+  const cached = groupNameCache.get(threadId);
+  const now = Date.now();
+  if (cached && now - cached.fetchedAt < _GROUP_NAME_TTL_MS) return cached.name;
+  try {
+    const info = await api.getGroupInfo(threadId);
+    const name = info?.gridInfoMap?.[threadId]?.name ?? "";
+    groupNameCache.set(threadId, {name, fetchedAt: now});
+    return name;
+  } catch (error) {
+    console.error("[zalo] getGroupInfo thất bại", error);
+    // Giữ giá trị cache cũ (nếu có) thay vì xoá, để lần sau vẫn còn thứ gì đó
+    // để hiển thị thay vì trắng tên; không cache lỗi để lần sau thử lại sớm.
+    return cached?.name ?? "";
+  }
 }
 
 async function sendMessageWithRetry(
@@ -231,6 +258,7 @@ function attachListener(api: ZaloApi): void {
 
     enqueueForThread(threadId, async () => {
       try {
+        const groupName = isGroup ? await resolveGroupName(api, threadId) : null;
         const replies = await bridge({
           event_id: `${isGroup ? "g" : "d"}:${threadId}:${messageId}`,
           kind,
@@ -239,6 +267,7 @@ function attachListener(api: ZaloApi): void {
           text,
           image_url: imageUrl,
           group_id: isGroup ? threadId : null,
+          group_name: groupName,
           message_id: messageId,
         });
         for (const reply of replies) {
