@@ -102,9 +102,11 @@ async def migrate() -> None:
         CREATE TABLE IF NOT EXISTS zalo_groups (
           group_id TEXT PRIMARY KEY,
           alias TEXT UNIQUE,
+          group_name TEXT,
           enabled BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE zalo_groups ADD COLUMN IF NOT EXISTS group_name TEXT;
         CREATE TABLE IF NOT EXISTS zalo_group_messages (
           id BIGSERIAL PRIMARY KEY,
           group_id TEXT NOT NULL REFERENCES zalo_groups(group_id) ON DELETE CASCADE,
@@ -470,18 +472,29 @@ async def zalo_lookup(external_id: str) -> User | None:
     return _zalo_user_from_rows(row, row)
 
 
-async def zalo_register_group(group_id: str) -> None:
-    """Ghi nhận một group_id mà B vừa thấy tin nhắn, không bật allowlist tự động."""
+async def zalo_register_group(group_id: str, group_name: str = "") -> None:
+    """Ghi nhận một group_id mà B vừa thấy tin nhắn, không bật allowlist tự động.
+    Nếu gateway kèm theo tên nhóm thật lấy từ Zalo (getGroupInfo), lưu lại vào
+    group_name để /nhom hiển thị tên thân thiện thay vì chỉ group_id trần, kể cả
+    khi admin chưa tự đặt alias qua /themnhom. Không ghi đè group_name cũ bằng
+    chuỗi rỗng (ví dụ lần gọi getGroupInfo thất bại phía gateway)."""
     db = await pool()
     await db.execute(
-        "INSERT INTO zalo_groups(group_id) VALUES($1) ON CONFLICT DO NOTHING", group_id
+        """
+        INSERT INTO zalo_groups(group_id, group_name) VALUES($1, NULLIF($2, ''))
+        ON CONFLICT(group_id) DO UPDATE
+          SET group_name = COALESCE(NULLIF(EXCLUDED.group_name, ''), zalo_groups.group_name)
+        """,
+        group_id,
+        group_name,
     )
 
 
 async def zalo_list_groups() -> list[dict[str, object]]:
     db = await pool()
     rows = await db.fetch(
-        "SELECT group_id, alias, enabled, created_at FROM zalo_groups ORDER BY created_at ASC"
+        "SELECT group_id, alias, group_name, enabled, created_at "
+        "FROM zalo_groups ORDER BY created_at ASC"
     )
     return [dict(row) for row in rows]
 
@@ -538,13 +551,14 @@ async def _zoom_ensure_user(conn: asyncpg.Connection, external_id: str) -> dict[
 
 
 def _zoom_user_from_rows(user_row: object, zoom_row: object) -> User:
-    # Không có phân biệt admin/user như Zalo (chưa có tính năng nào cần riêng quyền
-    # admin cho Zoom) — mọi Zoom user đã pair đều là Role.USER.
+    # Zoom chỉ dùng cho 1 người (chủ bot) nên KHÔNG phân biệt admin/user như Zalo —
+    # bất kỳ ai đã được owner Telegram pair qua /zoompair đều coi như ZOOM_ADMIN, dùng
+    # được /nhom, /tongket, /dangnoi ngay mà không cần thêm bước cấp quyền nào nữa.
     return User(
         user_row["id"],
         Channel(user_row["channel"]),
         user_row["external_id"],
-        Role.USER,
+        Role.ZOOM_ADMIN,
         zoom_row["status"] == "active",
     )
 
