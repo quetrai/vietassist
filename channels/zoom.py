@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -124,6 +125,44 @@ async def _access_token() -> str:
 
 _MAX_MESSAGE_CHARS = 4096  # Gioi han cua Zoom Team Chat cho 1 tin nhan (docs Zoom).
 
+# Zoom Team Chat dung phuong ngu Markdown RIENG (giong Slack), khac han GFM ma cac
+# model AI hay sinh ra:
+#   - Bold:      *text*   (GFM dung **text**)
+#   - Italic:    _text_   (giong nhau)
+#   - Gach ngang: ~text~   (GFM dung ~~text~~)
+#   - KHONG co header (#, ##, ###) va KHONG co bang (| a | b |) - Zoom hien nguyen
+#     van cac ky tu do nhu text thuong, rat xau.
+# Vi khong bat is_markdown_support, Zoom truoc gio con hien nguyen ca dau ** va #.
+_MD_TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
+_MD_TABLE_SEP_CELL = re.compile(r"^:?-{2,}:?$")
+_MD_HEADER = re.compile(r"^(#{1,6})\s+(.*)$")
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_MD_STRIKE = re.compile(r"~~(.+?)~~")
+
+
+def _to_zoom_markdown(text: str) -> str:
+    """Chuyen markdown GFM (## header, **bold**, bang |a|b|) ma model AI hay sinh ra
+    sang phuong ngu Markdown ma Zoom Team Chat thuc su ho tro. Dung cung voi
+    is_markdown_support=True trong body gui len Zoom."""
+    lines_out: list[str] = []
+    for line in text.split("\n"):
+        header_match = _MD_HEADER.match(line)
+        table_match = _MD_TABLE_ROW.match(line)
+        if header_match:
+            lines_out.append(f"*{header_match.group(2).strip()}*")
+            continue
+        if table_match:
+            cells = [c.strip() for c in table_match.group(1).split("|")]
+            if all(_MD_TABLE_SEP_CELL.match(c) for c in cells if c):
+                continue  # dòng phân cách "|---|---|" của bảng markdown - bỏ qua
+            lines_out.append("• " + " — ".join(c for c in cells if c))
+            continue
+        lines_out.append(line)
+    converted = "\n".join(lines_out)
+    converted = _MD_BOLD.sub(r"*\1*", converted)
+    converted = _MD_STRIKE.sub(r"~\1~", converted)
+    return converted
+
 
 async def _post_message(to_jid: str, text: str, user_jid: str, account_id: str) -> None:
     token = await _access_token()
@@ -132,6 +171,7 @@ async def _post_message(to_jid: str, text: str, user_jid: str, account_id: str) 
         "to_jid": to_jid,
         "user_jid": user_jid,
         "account_id": account_id,
+        "is_markdown_support": True,
         "content": {"body": [{"type": "message", "text": text}]},
     }
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
@@ -165,6 +205,10 @@ async def send_message(
     # settings.zoom_account_id (config tinh) khi khong lay duoc tu event lam fallback,
     # nhung uu tien gia tri tu event de tranh 7004 "No channel or user can be found".
     effective_account_id = account_id or settings.zoom_account_id
+    # Convert markdown GFM (##, **, |bang|) model AI hay sinh sang phuong ngu Zoom
+    # ho tro (*, _, khong header/bang) - neu khong Zoom hien nguyen van cac ky tu
+    # ##, ** rat xau vi khong duoc parse.
+    text = _to_zoom_markdown(text)
     # Zoom Team Chat tu choi (400) neu 1 tin nhan vuot qua 4096 ky tu. Cat nho thanh
     # nhieu tin thay vi gui nguyen mot khoi dai (vi du cau tra loi AI dai).
     for i in range(0, len(text), _MAX_MESSAGE_CHARS):
