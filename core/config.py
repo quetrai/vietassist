@@ -43,6 +43,15 @@ class Settings:
     # gemini-2.5-flash sẽ bị Google khai tử 16/10/2026 — gemini-3.6-flash là bản Flash mới
     # nhất còn free tier, vẫn hỗ trợ grounding (/gia, /vimo) và vision (ảnh→prompt).
     google_model: str = os.getenv("GOOGLE_MODEL", "gemini-3.6-flash").strip()
+    # 9Router (proxy OpenAI-compatible, xem README) — chỉ dùng khi user tự bật bằng lệnh
+    # /ai on (mặc định TẮT, không ảnh hưởng hành vi gốc). Khi bật, đây là provider ĐẦU
+    # TIÊN được thử cho chat tự do, vẫn fallback về Groq/OpenRouter/Google như bình
+    # thường nếu lỗi. KHÔNG dùng cho tra cứu grounding (/gia, /vimo) hay vision ảnh —
+    # 2 tính năng đó tiếp tục dùng Google như cũ, không đổi.
+    router9_api_key: str = os.getenv("ROUTER9_API_KEY", "").strip()
+    router9_base_url: str = os.getenv("ROUTER9_BASE_URL", "https://api.nangdecor.com/v1").strip()
+    router9_model: str = os.getenv("ROUTER9_MODEL", "notion/GPT-5.6 Luna").strip()
+    router9_max_concurrency: int = _integer("ROUTER9_MAX_CONCURRENCY", 4)
     ai_timeout_sec: int = _integer("AI_TIMEOUT_SEC", 45)
     chat_history_turns: int = _integer("CHAT_HISTORY_TURNS", 10)
     groq_max_concurrency: int = _integer("GROQ_MAX_CONCURRENCY", 8)
@@ -116,6 +125,7 @@ class Settings:
             "GROQ_MAX_CONCURRENCY": (1, 64, self.groq_max_concurrency),
             "OPENROUTER_MAX_CONCURRENCY": (1, 64, self.openrouter_max_concurrency),
             "GOOGLE_MAX_CONCURRENCY": (1, 64, self.google_max_concurrency),
+            "ROUTER9_MAX_CONCURRENCY": (1, 64, self.router9_max_concurrency),
             "STOCK_CACHE_TTL_SEC": (0, 3600, self.stock_cache_ttl_sec),
         }
         if self.zalo_enabled:

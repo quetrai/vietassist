@@ -49,10 +49,12 @@ async def migrate() -> None:
           role TEXT NOT NULL DEFAULT 'user',
           active BOOLEAN NOT NULL DEFAULT TRUE,
           rag_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+          ai_router_enabled BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE(channel, external_id)
         );
         ALTER TABLE users ADD COLUMN IF NOT EXISTS rag_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_router_enabled BOOLEAN NOT NULL DEFAULT FALSE;
         CREATE TABLE IF NOT EXISTS chat_messages (
           id BIGSERIAL PRIMARY KEY,
           user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -234,7 +236,7 @@ async def get_or_create_user(channel: Channel, external_id: str, role: Role) -> 
         VALUES($1,$2,$3)
         ON CONFLICT(channel, external_id) DO UPDATE
           SET role = CASE WHEN users.role = 'root' THEN users.role ELSE EXCLUDED.role END
-        RETURNING id::text, channel, external_id, role, active, rag_enabled
+        RETURNING id::text, channel, external_id, role, active, rag_enabled, ai_router_enabled
         """,
         channel.value,
         external_id,
@@ -247,6 +249,7 @@ async def get_or_create_user(channel: Channel, external_id: str, role: Role) -> 
         Role(row["role"]),
         row["active"],
         row["rag_enabled"],
+        row["ai_router_enabled"],
     )
 
 
@@ -257,6 +260,14 @@ async def set_rag_enabled(user_id: str, enabled: bool) -> None:
     không cần tra tài liệu, để tiết kiệm quota."""
     db = await pool()
     await db.execute("UPDATE users SET rag_enabled = $1 WHERE id = $2", enabled, user_id)
+
+
+async def set_ai_router_enabled(user_id: str, enabled: bool) -> None:
+    """Bật/tắt dùng 9Router làm provider mặc định cho chat tự do (lệnh /ai), riêng cho 1
+    user. Khi tắt (mặc định), chat() dùng lại đúng thứ tự provider gốc (Groq/OpenRouter/
+    Google) — xem core/models.py::ai_router_enabled và ai/router.py::text."""
+    db = await pool()
+    await db.execute("UPDATE users SET ai_router_enabled = $1 WHERE id = $2", enabled, user_id)
 
 
 PROCESSED_EVENTS_RETENTION_DAYS = 30

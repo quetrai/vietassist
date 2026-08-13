@@ -25,6 +25,10 @@ class User:
     role: Role
     active: bool = True
     rag_enabled: bool = False
+    # Bật bằng lệnh /ai on: dùng 9Router (xem core/config.py::router9_*) làm provider
+    # ĐẦU TIÊN cho chat tự do, vẫn fallback Groq/OpenRouter/Google như bình thường nếu
+    # lỗi. Mặc định TẮT — hành vi chat y hệt bản gốc khi user chưa từng /ai on.
+    ai_router_enabled: bool = False
 
     @property
     def can_use_group_summary(self) -> bool:
