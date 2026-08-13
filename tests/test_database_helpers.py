@@ -18,7 +18,13 @@ def test_zoom_user_from_rows_is_always_zoom_admin():
     """Zoom chỉ dùng cho 1 người (chủ bot) nên mọi user đã pair đều được coi là
     Role.ZOOM_ADMIN ngay, không cần lệnh cấp quyền admin riêng như /zaloadmin bên
     Zalo — xem services/zoom_admin.py::pair."""
-    user_row = {"id": "u1", "channel": "zoom", "external_id": "jid1"}
+    user_row = {
+        "id": "u1",
+        "channel": "zoom",
+        "external_id": "jid1",
+        "rag_enabled": False,
+        "ai_router_enabled": False,
+    }
     zoom_row = {"status": "active"}
     user = database._zoom_user_from_rows(user_row, zoom_row)
     assert user.role == Role.ZOOM_ADMIN
@@ -27,10 +33,33 @@ def test_zoom_user_from_rows_is_always_zoom_admin():
 
 
 def test_zoom_user_from_rows_respects_suspended_status():
-    user_row = {"id": "u1", "channel": "zoom", "external_id": "jid1"}
+    user_row = {
+        "id": "u1",
+        "channel": "zoom",
+        "external_id": "jid1",
+        "rag_enabled": False,
+        "ai_router_enabled": False,
+    }
     zoom_row = {"status": "suspended"}
     user = database._zoom_user_from_rows(user_row, zoom_row)
     assert user.active is False
     # Vẫn giữ quyền group summary dù bị khóa — active=False đã tự chặn hành động ở
     # tầng gọi (web.py kiểm tra user.active trước khi tới bất kỳ lệnh nào).
     assert user.can_use_group_summary
+
+
+def test_zoom_user_from_rows_propagates_ai_router_enabled():
+    """Regression: zoom_lookup từng thiếu cột ai_router_enabled/rag_enabled trong
+    SELECT nên /ai on của user Zoom/Zalo không bao giờ được đọc lại — 9Router luôn bị
+    coi là tắt dù đã bật, trong khi Telegram (get_or_create_user) không bị ảnh hưởng."""
+    user_row = {
+        "id": "u1",
+        "channel": "zoom",
+        "external_id": "jid1",
+        "rag_enabled": True,
+        "ai_router_enabled": True,
+    }
+    zoom_row = {"status": "active"}
+    user = database._zoom_user_from_rows(user_row, zoom_row)
+    assert user.ai_router_enabled is True
+    assert user.rag_enabled is True
