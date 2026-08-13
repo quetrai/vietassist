@@ -54,9 +54,53 @@ _REALTIME_MARKERS = (
 )
 
 
+_NEWS_TOPIC_WORDS = ("tin tức", "bản tin", "tin nóng", "tin trong ngày", "news")
+_FRESHNESS_WORDS = (
+    "hôm nay",
+    "hiện tại",
+    "hiện giờ",
+    "bây giờ",
+    "mới nhất",
+    "gần đây",
+    "vừa qua",
+    "trong ngày",
+    "ngày hôm nay",
+    "today",
+    "latest",
+    "now",
+    "currently",
+)
+_LOOKUP_INTENT_WORDS = (
+    "tra cứu",
+    "tra cứu giúp",
+    "tìm kiếm",
+    "tìm giúp",
+    "tìm hộ",
+    "tìm thông tin",
+    "kiểm tra giúp",
+    "search",
+    "look up",
+    "lookup",
+)
+
+
 def _is_realtime_request(text: str) -> bool:
     normalized = " ".join(text.casefold().split())
     if any(marker in normalized for marker in _REALTIME_MARKERS):
+        return True
+    # Yêu cầu "tra cứu"/"tìm kiếm" tường minh -> LUÔN ép qua tìm kiếm thời gian
+    # thực, tuyệt đối không rơi vào nhánh chat + knowledge base (yêu cầu của người
+    # vận hành: KB chỉ được dùng khi không phải ý định tra cứu/tìm kiếm).
+    if any(w in normalized for w in _LOOKUP_INTENT_WORDS):
+        return True
+    # Regression: "tin tức hôm nay" khớp _REALTIME_MARKERS vì đó là cụm liền nhau,
+    # nhưng câu tự nhiên hay chèn thêm từ ở giữa (vd "tin tức về AI hôm nay",
+    # "tin tức về thị trường chứng khoán hôm nay") thì so khớp cụm cố định bị lọt.
+    # Bắt thêm bằng cách kết hợp: có từ khóa chủ đề tin tức + có mốc thời gian bất kỳ
+    # đâu trong câu, không cần đứng liền kề nhau.
+    has_news_topic = any(w in normalized for w in _NEWS_TOPIC_WORDS)
+    has_freshness = any(w in normalized for w in _FRESHNESS_WORDS)
+    if has_news_topic and has_freshness:
         return True
 
     # Natural-language product/market price queries without explicit "hôm nay".
