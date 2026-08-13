@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -17,13 +18,14 @@ from ai.contracts import TaskType
 from core import database
 from core.models import User
 
-GROUP_COMMANDS = {"/nhom", "/nhomzalo", "/themnhom", "/xoanhom", "/tongket"}
+GROUP_COMMANDS = {"/nhom", "/nhomzalo", "/themnhom", "/xoanhom", "/tongket", "/dangnoi"}
 _IMAGE_TIMEOUT = httpx.Timeout(30.0)
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_REDIRECTS = 3
 _DEFAULT_IMAGE_SUFFIX = ".jpg"
 _ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _MAX_TRANSCRIPT_CHARS = 20000
+_VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class ZaloEvent:
     text: str
     kind: str = "direct"
     group_id: str | None = None
+    group_name: str | None = None
     message_id: str | None = None
     sender_name: str = ""
     sent_at: datetime | None = None
@@ -172,3 +175,38 @@ async def summarize_group(user: User, alias: str, period: str) -> str:
     )
     await database.zalo_save_summary(group_id, user.id, period_start, period_end, response.text)
     return response.text
+
+
+async def today_discussion(user: User, alias: str) -> str:
+    """Trả về nguyên văn (không qua AI tóm tắt) các tin nhắn của nhóm TỪ ĐẦU NGÀY
+    hôm nay (giờ Việt Nam) đến hiện tại - khác /tongket ở chỗ đây là transcript
+    thô, dùng khi muốn đọc lại đúng những gì đã được nhắn thay vì bản tóm tắt AI."""
+    denied = await require_group_admin(user)
+    if denied:
+        return denied
+    group_id = await database.zalo_group_id_for(alias)
+    if group_id is None:
+        return "Không tìm thấy nhóm đã bật allowlist."
+    now_vn = datetime.now(_VN_TZ)
+    start_of_day_vn = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
+    period_start = start_of_day_vn.astimezone(UTC)
+    db = await database.pool()
+    rows = await db.fetch(
+        """SELECT sender_name,content,sent_at FROM zalo_group_messages
+        WHERE group_id=$1 AND sent_at >= $2
+        ORDER BY sent_at ASC LIMIT 1000""",
+        group_id,
+        period_start,
+    )
+    if not rows:
+        return "Chưa có tin nhắn nào trong nhóm hôm nay."
+    lines = [
+        f"[{row['sent_at'].astimezone(_VN_TZ):%H:%M}] {row['sender_name']}: {row['content']}"
+        for row in rows
+    ]
+    transcript, truncated = _build_transcript(lines, _MAX_TRANSCRIPT_CHARS)
+    truncated_note = (
+        "\n[Đã lược bớt các tin nhắn cũ hơn trong ngày do quá dài]\n" if truncated else ""
+    )
+    header = f"💬 Thảo luận hôm nay ({now_vn:%d/%m/%Y}) — {len(rows)} tin nhắn\n"
+    return header + truncated_note + "\n" + transcript
