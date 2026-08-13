@@ -159,6 +159,12 @@ Tóm tắt các nhóm lệnh:
   OpenRouter). Bot nhớ được sự thật bền vững về bạn qua các lần chat trước (xem mục Kiến
   trúc — Trí nhớ dài hạn). Nếu câu nói khớp rõ ý định ghi chú/nhắc nhở (vd "ghi chú giúp
   anh...", "8 giờ tối nhắc anh gọi mẹ"), bot tự lưu luôn mà không cần gõ đúng lệnh `/...`.
+  Nếu câu hỏi đòi dữ liệu thời gian thực (tin tức, giá, tỷ giá... — có từ khóa "hôm nay",
+  "mới nhất", "tra cứu", "tìm kiếm"...) bot LUÔN chuyển sang tìm kiếm web thật (giống
+  `/vimo`), không bao giờ dùng knowledge base cho các câu này. Knowledge base (`/rag`,
+  xem mục bên dưới) mặc định TẮT với user mới — chỉ được tra khi user tự bật bằng `/rag
+  on`, và chỉ áp dụng cho các câu hỏi KHÔNG mang ý định tra cứu/tìm kiếm thời gian thực ở
+  trên.
 - **Tra cứu có grounding:** `/gia <sản phẩm>`, `/vimo <câu hỏi vĩ mô/tin tức>`.
 - **Dịch Nhật↔Việt:** `/dich [ja>vi|vi>ja] <nội dung>` — dịch chat công việc kỹ thuật giữa
   KIV và phía Nhật, không chỉ định chiều thì tự nhận diện qua chữ Nhật trong câu (có chữ
@@ -196,7 +202,10 @@ Tóm tắt các nhóm lệnh:
 - **Đăng nhập Zalo B:** `/zalologin` — gateway sinh mã QR, bot gửi ảnh QR ngay trong chat
   Telegram, quét bằng app Zalo của tài khoản B trong vài phút trước khi mã hết hạn.
 - **Knowledge base:** `/kbreindex` — tính lại embedding sau khi sửa `knowledge/*.md`, để
-  câu trả lời chat dùng được kiến thức mới nhất (RAG).
+  câu trả lời chat dùng được kiến thức mới nhất (RAG). RAG mặc định TẮT cho user mới —
+  gõ `/rag on` để bật, `/rag off` để tắt, gõ `/rag` suông để xem trạng thái hiện tại. Dù
+  bật hay tắt, các câu hỏi mang ý định tra cứu/tìm kiếm thời gian thực (xem mục "Chat tự
+  do" ở trên) luôn được ép qua tìm kiếm web thật, không bao giờ lấy từ knowledge base.
 - **Định dạng tin nhắn:** `services/tg_format.py` tự convert markdown-lite mà AI hay trả về
   (`**bold**`, `*italic*`/`_italic_`, `` `code` ``, link, gạch đầu dòng) sang HTML Telegram
   hỗ trợ, áp dụng cho chat tự do và kết quả lệnh (`/stock`, `/gia`, `/vimo`...). Tự chia
