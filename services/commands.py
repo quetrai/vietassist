@@ -5,13 +5,16 @@ from dataclasses import dataclass
 
 from ai import router
 from ai.contracts import GroundingUnavailable, ProviderError
+from channels.zalo import summarize_group
 from core import database
 from core.models import User
-from services import portfolio, reminders, translate as translate_service
+from services import portfolio, reminders, translate as translate_service, zalo_groups
 from services.chat import text_to_prompt
 from services.prompt_engine import prompt_spec
 from stock import analyze_symbol, quick_quote
 from stock.analysis import normalize_symbol
+
+_GROUP_FEATURE_DENIED = "Tính năng nhóm Zalo chỉ dành cho quản trị viên."
 
 Handler = Callable[[User, str], Awaitable[str]]
 
@@ -190,6 +193,35 @@ async def _cmd_rag(user: User, argument: str) -> str:
     return f"Trạng thái RAG hiện tại: {status}\nCú pháp: /rag on | /rag off"
 
 
+async def _cmd_nhomzalo(user: User, argument: str) -> str:
+    if not user.can_use_group_summary:
+        return _GROUP_FEATURE_DENIED
+    return await zalo_groups.list_groups()
+
+
+async def _cmd_themnhom(user: User, argument: str) -> str:
+    if not user.can_use_group_summary:
+        return _GROUP_FEATURE_DENIED
+    group_id, _, alias = argument.strip().partition(" ")
+    return await zalo_groups.add_group(group_id, alias.strip())
+
+
+async def _cmd_xoanhom(user: User, argument: str) -> str:
+    if not user.can_use_group_summary:
+        return _GROUP_FEATURE_DENIED
+    return await zalo_groups.remove_group(argument.strip())
+
+
+async def _cmd_tongket(user: User, argument: str) -> str:
+    # Cho phép admin (Zalo lẫn Zoom/Telegram, vì role là thuộc tính của user, không phải
+    # kênh) hỏi "nhóm Zalo đang thảo luận gì" ngay từ Zoom/Telegram, không chỉ từ trong
+    # group chat Zalo. summarize_group() tự kiểm tra can_use_group_summary bên trong.
+    parts = argument.split()
+    if not parts:
+        return "Cú pháp: /tongket <nhóm> [24h|7d]"
+    return await summarize_group(user, parts[0], parts[1] if len(parts) > 1 else "24h")
+
+
 COMMANDS: dict[str, Command] = {
     "/gia": Command(_cmd_gia, "/gia <sản phẩm> — tra giá bán hiện tại"),
     "/prompt": Command(_cmd_prompt, "/prompt <mô tả ảnh> — viết prompt tạo ảnh"),
@@ -220,6 +252,25 @@ COMMANDS: dict[str, Command] = {
     ),
     "/danhmuc": Command(_cmd_danhmuc, "/danhmuc — xem danh mục"),
     "/rag": Command(_cmd_rag, "/rag [on|off] — bật/tắt tra cứu knowledge base cho chat"),
+    "/nhom": Command(
+        _cmd_nhomzalo,
+        "/nhom — xem danh sách nhóm Zalo đã bật allowlist (chỉ admin)",
+    ),
+    "/nhomzalo": Command(
+        _cmd_nhomzalo,
+        "/nhomzalo — giống /nhom (xem danh sách nhóm Zalo, chỉ admin)",
+    ),
+    "/themnhom": Command(
+        _cmd_themnhom, "/themnhom <group_id> [alias] — thêm nhóm Zalo vào allowlist (chỉ admin)"
+    ),
+    "/xoanhom": Command(
+        _cmd_xoanhom, "/xoanhom <group_id hoặc alias> — gỡ nhóm Zalo khỏi allowlist (chỉ admin)"
+    ),
+    "/tongket": Command(
+        _cmd_tongket,
+        "/tongket <nhóm> [24h|7d] — nhóm Zalo đang thảo luận gì (tóm tắt AI, chỉ admin), "
+        "dùng được cả từ Zoom/Telegram",
+    ),
 }
 
 
