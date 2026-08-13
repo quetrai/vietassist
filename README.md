@@ -183,6 +183,12 @@ Tóm tắt các nhóm lệnh:
   `/dsghichu`, vẫn giữ làm alias). `/xoaghichu <id>` xoá.
 - **Nhắc nhở:** `/nhac [30p|2h|1ngay|HH:MM] [nội dung]` — có nội dung: đặt nhắc nhở; để
   trống: xem danh sách (giống `/dsnhac`, vẫn giữ làm alias). `/xoanhac <id>` xoá.
+- **Nhóm Zalo** (chỉ admin — role `root`/`zalo_admin`): `/nhom` (hoặc `/nhomzalo`) xem
+  danh sách nhóm đã bật allowlist, `/themnhom <group_id> [alias]` bật, `/xoanhom
+  <group_id|alias>` tắt, `/tongket <group_id|alias> [24h|7d]` tóm tắt nhóm đang thảo
+  luận gì bằng AI. Các lệnh này dùng chung `services/commands.py` nên gõ được từ
+  Telegram và Zoom Team Chat y hệt như từ Zalo — không cần đứng trong group Zalo. Xem
+  chi tiết & lưu ý riêng tư ở mục "Sử dụng — Zalo" bên dưới.
 - **Quản trị Zalo** (chỉ Telegram owner dùng được): `/zalopair <id_zalo> [tên]` cấp quyền
   user, `/zaloadmin <id_zalo> [tên]` cấp quyền admin (được dùng tính năng nhóm),
   `/zalokhoa`/`/zalomokhoa <id_zalo>` khoá/mở khoá, `/zaloxoa <id_zalo>` gỡ quyền,
@@ -243,6 +249,12 @@ người đó dùng được tính năng quản lý nhóm.
   bằng AI (chỉ dựa trên tin nhắn đã lưu, không tự thêm dữ kiện ngoài).
 - Ngoài các lệnh trên, group chỉ log tin nhắn (phục vụ `/tongket`), **không** trả lời chat
   tự do trong group — tránh bot trả lời ồn ào giữa cuộc trò chuyện của người khác.
+
+**Hỏi từ Zoom hoặc chat 1-1 (không cần đứng trong group Zalo):** `/nhom` (hoặc
+`/nhomzalo`), `/themnhom`, `/xoanhom`, `/tongket` cũng dùng được y hệt từ Zoom Team Chat
+hoặc nhắn 1-1 với Zalo B/Telegram — chỉ cần tài khoản đó có quyền admin (`role` là
+`root` hoặc `zalo_admin`, không phụ thuộc kênh đang nhắn). Ví dụ gõ trong Zoom:
+`/tongket vip 24h` để xem nhóm Zalo "vip" đang thảo luận gì trong 24h qua.
 
 **Digest hằng ngày:** nếu `ZALO_ENABLED=true`, mỗi ngày vào giờ `ZALO_DAILY_DIGEST_HOUR`
 (giờ Việt Nam), A admin nhận tóm tắt tự động cho các nhóm đã bật.

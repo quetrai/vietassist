@@ -114,6 +114,11 @@ _MENU_DESCRIPTIONS: dict[str, str] = {
     "muctieu": "Đặt mức stop/target tham khảo cho 1 mã đang giữ",
     "danhmuc": "Xem danh mục đầu tư",
     "rag": "Bật/tắt tra cứu knowledge base cho chat",
+    "nhom": "Xem danh sách nhóm Zalo đã bật allowlist (chỉ admin)",
+    "nhomzalo": "Giống /nhom (chỉ admin)",
+    "themnhom": "Thêm nhóm Zalo vào allowlist (chỉ admin)",
+    "xoanhom": "Gỡ nhóm Zalo khỏi allowlist (chỉ admin)",
+    "tongket": "Nhóm Zalo đang thảo luận gì (tóm tắt AI, chỉ admin)",
     "zalopair": "Cấp quyền cho 1 người dùng Zalo",
     "zaloadmin": "Cấp quyền admin nhóm Zalo",
     "zalokhoa": "Khoá 1 người dùng Zalo",
@@ -140,6 +145,7 @@ _MENU_ORDER: list[str] = [
     "zalopair", "zaloadmin", "zalokhoa", "zalomokhoa", "zaloxoa", "zalodanhsach",
     "zalologin", "kbreindex",
     "zoompair", "zoomkhoa", "zoommokhoa", "zoomxoa", "zoomdanhsach",
+    "nhom", "nhomzalo", "themnhom", "xoanhom", "tongket",
 ]
 
 
