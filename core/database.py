@@ -361,7 +361,7 @@ async def _zalo_ensure_user(conn: asyncpg.Connection, external_id: str) -> dict[
         INSERT INTO users(channel, external_id, role)
         VALUES('zalo', $1, 'user')
         ON CONFLICT(channel, external_id) DO UPDATE SET channel = users.channel
-        RETURNING id::text, channel, external_id
+        RETURNING id::text, channel, external_id, rag_enabled, ai_router_enabled
         """,
         external_id,
     )
@@ -374,6 +374,8 @@ def _zalo_user_from_rows(user_row: object, zalo_row: object) -> User:
         user_row["external_id"],
         Role.ZALO_ADMIN if zalo_row["role"] == "admin" else Role.USER,
         zalo_row["status"] == "active",
+        user_row["rag_enabled"],
+        user_row["ai_router_enabled"],
     )
 
 
@@ -469,7 +471,8 @@ async def zalo_lookup(external_id: str) -> User | None:
     db = await pool()
     row = await db.fetchrow(
         """
-        SELECT u.id::text AS id, u.channel, u.external_id, z.role, z.status
+        SELECT u.id::text AS id, u.channel, u.external_id, u.rag_enabled, u.ai_router_enabled,
+               z.role, z.status
         FROM users u
         JOIN zalo_users z ON z.user_id = u.id
         WHERE u.channel = 'zalo' AND u.external_id = $1
@@ -556,7 +559,7 @@ async def _zoom_ensure_user(conn: asyncpg.Connection, external_id: str) -> dict[
         INSERT INTO users(channel, external_id, role)
         VALUES('zoom', $1, 'user')
         ON CONFLICT(channel, external_id) DO UPDATE SET channel = users.channel
-        RETURNING id::text, channel, external_id
+        RETURNING id::text, channel, external_id, rag_enabled, ai_router_enabled
         """,
         external_id,
     )
@@ -572,6 +575,8 @@ def _zoom_user_from_rows(user_row: object, zoom_row: object) -> User:
         user_row["external_id"],
         Role.ZOOM_ADMIN,
         zoom_row["status"] == "active",
+        user_row["rag_enabled"],
+        user_row["ai_router_enabled"],
     )
 
 
@@ -645,7 +650,8 @@ async def zoom_lookup(external_id: str) -> User | None:
     db = await pool()
     row = await db.fetchrow(
         """
-        SELECT u.id::text AS id, u.channel, u.external_id, z.status
+        SELECT u.id::text AS id, u.channel, u.external_id, u.rag_enabled, u.ai_router_enabled,
+               z.status
         FROM users u
         JOIN zoom_users z ON z.user_id = u.id
         WHERE u.channel = 'zoom' AND u.external_id = $1
@@ -686,7 +692,8 @@ async def zalo_admin_user() -> User | None:
     db = await pool()
     row = await db.fetchrow(
         """
-        SELECT u.id::text AS id, u.channel, u.external_id, z.role, z.status
+        SELECT u.id::text AS id, u.channel, u.external_id, u.rag_enabled, u.ai_router_enabled,
+               z.role, z.status
         FROM zalo_users z
         JOIN users u ON u.id = z.user_id
         WHERE z.role = 'admin' AND z.status = 'active'
