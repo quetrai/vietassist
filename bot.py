@@ -119,6 +119,7 @@ _MENU_DESCRIPTIONS: dict[str, str] = {
     "themnhom": "Thêm nhóm Zalo vào allowlist (chỉ admin)",
     "xoanhom": "Gỡ nhóm Zalo khỏi allowlist (chỉ admin)",
     "tongket": "Nhóm Zalo đang thảo luận gì (tóm tắt AI, chỉ admin)",
+    "dangnoi": "Xem nguyên văn thảo luận trong ngày hôm nay của nhóm Zalo (chỉ admin)",
     "zalopair": "Cấp quyền cho 1 người dùng Zalo",
     "zaloadmin": "Cấp quyền admin nhóm Zalo",
     "zalokhoa": "Khoá 1 người dùng Zalo",
@@ -145,7 +146,7 @@ _MENU_ORDER: list[str] = [
     "zalopair", "zaloadmin", "zalokhoa", "zalomokhoa", "zaloxoa", "zalodanhsach",
     "zalologin", "kbreindex",
     "zoompair", "zoomkhoa", "zoommokhoa", "zoomxoa", "zoomdanhsach",
-    "nhom", "nhomzalo", "themnhom", "xoanhom", "tongket",
+    "nhom", "nhomzalo", "themnhom", "xoanhom", "tongket", "dangnoi",
 ]
 
 
@@ -398,6 +399,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start, filters=owner))
     app.add_handler(CommandHandler("help", help_command, filters=owner))
     for name in commands.COMMANDS:
+        if name == "/help":
+            continue  # Telegram đã có CommandHandler("help", ...) riêng ở trên.
         app.add_handler(CommandHandler(name.lstrip("/"), command, filters=owner))
     for name in ZALO_ADMIN_COMMANDS:
         app.add_handler(CommandHandler(name, zalo_manage, filters=owner))

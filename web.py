@@ -20,6 +20,7 @@ from ai import router
 from ai.contracts import ProviderError, ProviderUnavailable
 from bot import build_application
 from channels.zalo import ZaloEvent, download_image, is_group_command, resolve_user, summarize_group
+from channels.zalo import today_discussion
 from channels.zoom import ZoomEvent, build_url_validation_response, parse_event as parse_zoom_event
 from channels.zoom import resolve_user as resolve_zoom_user
 from channels.zoom import send_message as send_zoom_message
@@ -69,6 +70,7 @@ class BridgeEvent(BaseModel):
     sender_name: str = Field(default="", max_length=256)
     text: str = Field(default="", max_length=20000)
     group_id: str | None = Field(default=None, max_length=256)
+    group_name: str | None = Field(default=None, max_length=512)
     message_id: str | None = Field(default=None, max_length=256)
     image_url: str | None = Field(default=None, max_length=2048)
 
@@ -391,7 +393,7 @@ async def _handle_zalo_event(event: ZaloEvent) -> BridgeReply:
             if user is None or not user.active:
                 return BridgeReply(messages=[])
             return await _handle_group_command(user, text)
-        await database.zalo_register_group(event.group_id)
+        await database.zalo_register_group(event.group_id, event.group_name or "")
         db = await database.pool()
         await db.execute(
             """INSERT INTO zalo_group_messages(group_id,external_message_id,sender_name,content,sent_at)
@@ -452,7 +454,7 @@ async def _handle_group_command(user: User, text: str) -> BridgeReply:
     if not user.can_use_group_summary:
         message = (
             "Tính năng tổng kết nhóm chỉ dành cho quản trị viên."
-            if cmd == "/tongket"
+            if cmd in ("/tongket", "/dangnoi")
             else "Tính năng nhóm chỉ dành cho quản trị viên."
         )
         return BridgeReply(messages=[message])
@@ -461,6 +463,12 @@ async def _handle_group_command(user: User, text: str) -> BridgeReply:
             return BridgeReply(messages=["Cú pháp: /tongket <nhóm> [24h|7d]"])
         result = await summarize_group(user, args[0], args[1] if len(args) > 1 else "24h")
         return BridgeReply(messages=[result])
+    if cmd == "/dangnoi":
+        if not args:
+            return BridgeReply(
+                messages=["Cú pháp: /dangnoi <nhóm> — xem nguyên văn thảo luận trong ngày hôm nay"]
+            )
+        return BridgeReply(messages=[await today_discussion(user, args[0])])
     if cmd in ("/nhom", "/nhomzalo"):
         return BridgeReply(messages=[await zalo_groups.list_groups()])
     if cmd == "/themnhom":
