@@ -33,7 +33,7 @@ services:
       - key: BRIDGE_SECRET
         sync: false
       - key: ZALO_ENABLED
-        value: "false"
+        value: "true"
       - key: ZOOM_ENABLED
         value: "true"
       - key: ZOOM_CLIENT_ID
