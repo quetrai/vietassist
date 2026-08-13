@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -82,6 +83,32 @@ class OpenAICompatibleProvider:
     async def close(self) -> None:
         await self.client.aclose()
 
+    @staticmethod
+    def _parse_sse_content(raw: str) -> str:
+        """Một số gateway (vd 9Router khi provider phía sau chỉ hỗ trợ streaming) trả về
+        text/event-stream ('data: {...}\\n\\n') ngay cả khi request không xin stream. Gom lại
+        nội dung delta/message từ các chunk JSON trong luồng SSE đó."""
+        pieces: list[str] = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            for choice in chunk.get("choices", []):
+                delta_content = (choice.get("delta") or {}).get("content")
+                if delta_content:
+                    pieces.append(delta_content)
+                msg_content = (choice.get("message") or {}).get("content")
+                if msg_content:
+                    pieces.append(msg_content)
+        return "".join(pieces)
+
     async def generate(
         self,
         messages: list[dict[str, Any]],
@@ -99,6 +126,7 @@ class OpenAICompatibleProvider:
             "messages": payload_messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "stream": False,
         }
         async with self.semaphore:
             try:
@@ -106,8 +134,15 @@ class OpenAICompatibleProvider:
                     f"{self.base_url}/chat/completions", headers=headers, json=payload
                 )
                 response.raise_for_status()
-                data = response.json()
-                text = data["choices"][0]["message"]["content"]
+                content_type = response.headers.get("content-type", "")
+                if "text/event-stream" in content_type or response.text.lstrip().startswith("data:"):
+                    # Gateway bỏ qua "stream": false và trả SSE (thường do provider phía
+                    # sau chỉ hỗ trợ streaming) -> parse thủ công thay vì response.json().
+                    text = self._parse_sse_content(response.text)
+                    data: Any = {"sse_raw_len": len(response.text)}
+                else:
+                    data = response.json()
+                    text = data["choices"][0]["message"]["content"]
                 if not text:
                     raise ProviderError(f"{self.name} trả kết quả rỗng")
                 return AIResponse(text=text.strip(), provider=self.name, model=self.model, raw=data)
