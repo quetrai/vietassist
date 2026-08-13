@@ -242,3 +242,106 @@ async def test_vimo_reports_friendly_message_on_generic_provider_error(monkeypat
     monkeypatch.setattr(commands.router, "macro_news", fake_macro_news)
     result = await commands.handle(_USER, "/vimo lãi suất")
     assert "lỗi tạm thời" in result
+
+
+# --- Lệnh nhóm Zalo dùng chung mọi kênh (Zalo DM, Zoom, Telegram) ------------------
+# Trước đây các lệnh này chỉ hoạt động khi gõ TRONG group chat Zalo
+# (xem web.py::_handle_group_command). Giờ đăng ký thêm vào COMMANDS để admin
+# (role ROOT/ZALO_ADMIN, không phụ thuộc kênh) có thể hỏi từ Zoom/Telegram luôn -
+# ví dụ "nhóm Zalo đang thảo luận gì" ngay trong Zoom.
+
+_ADMIN_ZOOM = User("a1", Channel.ZOOM, "zoomjid1", Role.ZALO_ADMIN)
+_NORMAL_ZOOM = User("u2", Channel.ZOOM, "zoomjid2", Role.USER)
+
+
+async def test_nhomzalo_denied_for_non_admin():
+    result = await commands.handle(_NORMAL_ZOOM, "/nhom")
+    assert "chỉ dành cho quản trị viên" in result
+
+
+async def test_nhom_and_nhomzalo_are_aliases(monkeypatch):
+    async def fake_list_groups():
+        return "g1 (alias: vip) — bật"
+
+    monkeypatch.setattr(commands.zalo_groups, "list_groups", fake_list_groups)
+    assert await commands.handle(_ADMIN_ZOOM, "/nhom") == "g1 (alias: vip) — bật"
+    assert await commands.handle(_ADMIN_ZOOM, "/nhomzalo") == "g1 (alias: vip) — bật"
+
+
+async def test_themnhom_from_zoom_passes_group_id_and_alias(monkeypatch):
+    captured = {}
+
+    async def fake_add_group(group_id, alias):
+        captured.update(group_id=group_id, alias=alias)
+        return "ok"
+
+    monkeypatch.setattr(commands.zalo_groups, "add_group", fake_add_group)
+    result = await commands.handle(_ADMIN_ZOOM, "/themnhom g123 vip")
+    assert result == "ok"
+    assert captured == {"group_id": "g123", "alias": "vip"}
+
+
+async def test_themnhom_denied_for_non_admin():
+    result = await commands.handle(_NORMAL_ZOOM, "/themnhom g123 vip")
+    assert "chỉ dành cho quản trị viên" in result
+
+
+async def test_xoanhom_from_zoom(monkeypatch):
+    captured = {}
+
+    async def fake_remove_group(identifier):
+        captured["identifier"] = identifier
+        return "Đã gỡ"
+
+    monkeypatch.setattr(commands.zalo_groups, "remove_group", fake_remove_group)
+    result = await commands.handle(_ADMIN_ZOOM, "/xoanhom vip")
+    assert result == "Đã gỡ"
+    assert captured == {"identifier": "vip"}
+
+
+async def test_tongket_syntax_hint_when_no_argument():
+    result = await commands.handle(_ADMIN_ZOOM, "/tongket")
+    assert "Cú pháp" in result
+
+
+async def test_tongket_from_zoom_defaults_to_24h(monkeypatch):
+    captured = {}
+
+    async def fake_summarize_group(user, alias, period):
+        captured.update(user=user, alias=alias, period=period)
+        return "nhóm đang bàn về FPT"
+
+    monkeypatch.setattr(commands, "summarize_group", fake_summarize_group)
+    result = await commands.handle(_ADMIN_ZOOM, "/tongket vip")
+    assert result == "nhóm đang bàn về FPT"
+    assert captured["alias"] == "vip"
+    assert captured["period"] == "24h"
+    assert captured["user"] is _ADMIN_ZOOM
+
+
+async def test_tongket_from_zoom_accepts_7d(monkeypatch):
+    captured = {}
+
+    async def fake_summarize_group(user, alias, period):
+        captured["period"] = period
+        return "ok"
+
+    monkeypatch.setattr(commands, "summarize_group", fake_summarize_group)
+    await commands.handle(_ADMIN_ZOOM, "/tongket vip 7d")
+    assert captured["period"] == "7d"
+
+
+async def test_tongket_permission_check_delegated_to_summarize_group(monkeypatch):
+    """/tongket không tự chặn quyền ở lớp commands.py mà để summarize_group() (đã có
+    test riêng ở test_zalo_auth.py) quyết định, tránh 2 nơi rớt ra 2 thông báo khác
+    nhau khi Zoom/Telegram gọi vào."""
+    captured = {}
+
+    async def fake_summarize_group(user, alias, period):
+        captured["called"] = True
+        return "Tính năng tổng kết nhóm chỉ dành cho quản trị viên."
+
+    monkeypatch.setattr(commands, "summarize_group", fake_summarize_group)
+    result = await commands.handle(_NORMAL_ZOOM, "/tongket vip")
+    assert captured["called"] is True
+    assert "chỉ dành cho quản trị viên" in result
