@@ -20,9 +20,17 @@ from ai import router
 from ai.contracts import ProviderError, ProviderUnavailable
 from bot import build_application
 from channels.zalo import ZaloEvent, download_image, is_group_command, resolve_user, summarize_group
-from channels.zoom import ZoomEvent, build_url_validation_response, parse_event as parse_zoom_event
-from channels.zoom import resolve_user as resolve_zoom_user
-from channels.zoom import send_message as send_zoom_message
+from channels.zoom import (
+    ZoomEvent,
+    ZoomInteraction,
+    build_url_validation_response,
+    parse_event as parse_zoom_event,
+    parse_interaction as parse_zoom_interaction,
+    resolve_user as resolve_zoom_user,
+    send_card as send_zoom_card,
+    send_message as send_zoom_message,
+)
+from channels import zoom_ui
 from channels.zoom import verify_webhook_signature as verify_zoom_webhook_signature
 from channels.zoom import verify_webhook_token as verify_zoom_webhook_token
 from core import database, knowledge
@@ -222,6 +230,23 @@ async def webhook_zoom(request: Request) -> Response:
     if not authorized:
         raise HTTPException(403)
 
+    interaction = parse_zoom_interaction(payload)
+    if interaction is not None:
+        lease_token = await database.claim_event(Channel.ZOOM, interaction.event_id)
+        if lease_token is None:
+            return Response(status_code=200)
+        try:
+            await _handle_zoom_interaction(interaction)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                await database.fail_event(
+                    Channel.ZOOM, interaction.event_id, lease_token, f"{type(exc).__name__}: {exc}"
+                )
+            logger.exception("Zoom interaction %s failed", interaction.event_id)
+            raise HTTPException(503, "Temporary processing failure") from exc
+        await database.complete_event(Channel.ZOOM, interaction.event_id, lease_token)
+        return Response(status_code=200)
+
     event = parse_zoom_event(payload)
     if event is None:
         # Sự kiện không phải tin nhắn/slash command (vd bot bị thêm vào channel) — bỏ
@@ -344,6 +369,55 @@ async def _notify_owner_unpaired_zoom_sender(sender_jid: str) -> None:
         await telegram.bot.send_message(chat_id=settings.telegram_owner_id, text=text)
 
 
+async def _handle_zoom_interaction(event: ZoomInteraction) -> None:
+    user = await resolve_zoom_user(event.sender_jid)
+    if user is None:
+        await _notify_owner_unpaired_zoom_sender(event.sender_jid)
+        return
+    if not user.active:
+        await send_zoom_message(
+            event.reply_jid,
+            "Tài khoản đang bị tạm khóa.",
+            user_jid=event.sender_jid,
+            account_id=event.account_id,
+        )
+        return
+
+    action = event.action
+    direct_commands = {
+        "portfolio:list": "/danhmuc",
+        "system:rag:on": "/rag on",
+        "system:rag:off": "/rag off",
+    }
+    command = direct_commands.get(action)
+    if command:
+        result = await commands.handle(user, command)
+        if result is not None:
+            await send_zoom_message(
+                event.reply_jid, result, user_jid=event.sender_jid, account_id=event.account_id
+            )
+        if action == "portfolio:list":
+            await send_zoom_card(
+                event.reply_jid, zoom_ui.stock_menu(), user_jid=event.sender_jid, account_id=event.account_id
+            )
+        elif action.startswith("system:rag:"):
+            await send_zoom_card(
+                event.reply_jid, zoom_ui.system_menu(), user_jid=event.sender_jid, account_id=event.account_id
+            )
+        return
+
+    card = zoom_ui.card_for_action(action)
+    if card is not None:
+        await send_zoom_card(
+            event.reply_jid, card, user_jid=event.sender_jid, account_id=event.account_id
+        )
+        return
+
+    await send_zoom_card(
+        event.reply_jid, zoom_ui.main_menu(), user_jid=event.sender_jid, account_id=event.account_id
+    )
+
+
 async def _handle_zoom_event(event: ZoomEvent) -> None:
     text = event.text.strip()
     user = await resolve_zoom_user(event.sender_jid)
@@ -358,6 +432,11 @@ async def _handle_zoom_event(event: ZoomEvent) -> None:
             "Tài khoản đang bị tạm khóa.",
             user_jid=event.sender_jid,
             account_id=event.account_id,
+        )
+        return
+    if not text or text in {"/vietassist", "vietassist"}:
+        await send_zoom_card(
+            event.reply_jid, zoom_ui.main_menu(), user_jid=event.sender_jid, account_id=event.account_id
         )
         return
     command_result = await commands.handle(user, text)
