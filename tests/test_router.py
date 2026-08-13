@@ -34,6 +34,41 @@ async def test_text_prefers_groq(router):
     assert router.openrouter.calls == 0
 
 
+async def test_text_ignores_router9_by_default(router):
+    """Mặc định (chưa /ai on, prefer_router9=False) hành vi phải y hệt bản gốc — không
+    được đụng tới router9 dù attribute có tồn tại hay không."""
+    from ai.contracts import TaskType
+
+    router.router9 = _FakeProvider("router9")
+    response = await router.text(TaskType.CHAT, [{"role": "user", "content": "hi"}], system="s")
+    assert response.provider == "groq"
+    assert router.router9.calls == 0
+
+
+async def test_text_prefers_router9_when_requested(router):
+    """/ai on -> prefer_router9=True -> router9 phải được thử TRƯỚC groq."""
+    from ai.contracts import TaskType
+
+    router.router9 = _FakeProvider("router9")
+    response = await router.text(
+        TaskType.CHAT, [{"role": "user", "content": "hi"}], system="s", prefer_router9=True
+    )
+    assert response.provider == "router9"
+    assert router.groq.calls == 0
+
+
+async def test_text_falls_back_past_router9_when_it_fails(router):
+    """router9 lỗi (vd chưa cấu hình ROUTER9_API_KEY, hoặc timeout) -> vẫn phải fallback
+    tiếp qua groq/openrouter/google như bình thường, không được raise ngay."""
+    from ai.contracts import TaskType
+
+    router.router9 = _FakeProvider("router9", fail=True)
+    response = await router.text(
+        TaskType.CHAT, [{"role": "user", "content": "hi"}], system="s", prefer_router9=True
+    )
+    assert response.provider == "groq"
+
+
 async def test_text_falls_back_to_openrouter_when_groq_fails():
     from ai.contracts import TaskType
 

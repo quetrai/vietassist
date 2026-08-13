@@ -47,7 +47,7 @@ async def test_chat_passes_user_rag_flag(monkeypatch):
         text = "trả lời"
         provider = "fake"
 
-    async def fake_text(task_type, messages, system=None):
+    async def fake_text(task_type, messages, system=None, prefer_router9=False):
         return FakeResponse()
 
     async def fake_update_memory(user_id, user_text, assistant_text):
@@ -66,6 +66,46 @@ async def test_chat_passes_user_rag_flag(monkeypatch):
     user_on = User("u1", Channel.TELEGRAM, "1", Role.ROOT, True, True)
     await chat.chat(user_on, "xin chào")
     assert captured["rag_enabled"] is True
+
+
+async def test_chat_passes_user_ai_router_flag(monkeypatch):
+    """chat() phải truyền đúng user.ai_router_enabled xuống router.text(prefer_router9=...),
+    để /ai on chỉ ưu tiên 9Router cho đúng user đã bật, không ảnh hưởng user khác."""
+    captured = {}
+
+    async def fake_history(user_id, turns):
+        return []
+
+    async def fake_add_message(user_id, role, content):
+        return None
+
+    class FakeResponse:
+        text = "trả lời"
+        provider = "fake"
+
+    async def fake_text(task_type, messages, *, system, prefer_router9=False):
+        captured["prefer_router9"] = prefer_router9
+        return FakeResponse()
+
+    async def fake_update_memory(user_id, user_text, assistant_text):
+        return None
+
+    async def fake_build_memory_context(user_id):
+        return ""
+
+    monkeypatch.setattr(chat.database, "history", fake_history)
+    monkeypatch.setattr(chat.database, "add_message", fake_add_message)
+    monkeypatch.setattr(chat.router, "text", fake_text)
+    monkeypatch.setattr(chat.memory, "update_memory", fake_update_memory)
+    monkeypatch.setattr(chat.memory, "build_memory_context", fake_build_memory_context)
+
+    user_off = User("u1", Channel.TELEGRAM, "1", Role.ROOT, True, False, False)
+    await chat.chat(user_off, "xin chào")
+    assert captured["prefer_router9"] is False
+
+    user_on = User("u1", Channel.TELEGRAM, "1", Role.ROOT, True, False, True)
+    await chat.chat(user_on, "xin chào")
+    assert captured["prefer_router9"] is True
 
 
 async def test_chat_returns_tool_reply_without_calling_llm_chat(monkeypatch):
@@ -111,7 +151,7 @@ async def test_chat_falls_through_to_normal_chat_when_no_tool_matched(monkeypatc
         text = "trả lời bình thường"
         provider = "fake"
 
-    async def fake_text(task_type, messages, system=None):
+    async def fake_text(task_type, messages, system=None, prefer_router9=False):
         return FakeResponse()
 
     async def fake_update_memory(user_id, user_text, assistant_text):
