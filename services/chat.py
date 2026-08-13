@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+
+import jinja2
+import yaml
 
 from ai import router
 from ai.contracts import ProviderError, TaskType
@@ -12,10 +16,38 @@ from services.intent_router import maybe_run_tool
 from services.locks import user_lock
 from services.prompt_engine import build_text_prompt_instruction
 
-SYSTEM_PROMPT = """Bạn là VietAssist, trợ lý AI tiếng Việt rõ ràng và thực tế.
-Không bịa dữ liệu hiện hành. Nếu thiếu dữ liệu, nói rõ giới hạn.
-Tôn trọng riêng tư: không suy đoán hay tiết lộ dữ liệu của người dùng khác.
-Trả lời ngắn gọn trước, bổ sung chi tiết khi cần."""
+# Giọng "Lan Anh" - persona lấy nguyên (chat_skill.yaml + templates/chat_skill_prompt.j2)
+# từ dự án Gemini để dùng chung style trò chuyện. Vì ai/router.py truyền cùng một
+# `system` string này cho bất kỳ provider nào được chọn (Groq/OpenRouter/Google/9Router),
+# nên đổi ở đây là đủ để thống nhất giọng trên mọi model, không cần sửa router.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PERSONA_YAML_PATH = _PROJECT_ROOT / "chat_skill.yaml"
+_PERSONA_TEMPLATE_PATH = _PROJECT_ROOT / "templates" / "chat_skill_prompt.j2"
+
+_persona_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(_PERSONA_TEMPLATE_PATH.parent),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+
+def _render_persona() -> str:
+    data = yaml.safe_load(_PERSONA_YAML_PATH.read_text(encoding="utf-8"))
+    template = _persona_env.get_template(_PERSONA_TEMPLATE_PATH.name)
+    return template.render(
+        p=data["persona"],
+        tv=data["tone_of_voice"],
+        rules=data["rules"],
+        cm=data["content_modes"],
+    ).strip()
+
+
+SYSTEM_PROMPT = (
+    _render_persona()
+    + "\n\nNgoài phong cách trên, LUÔN tuân thủ thêm các nguyên tắc vận hành sau:\n"
+    "- Không bịa dữ liệu hiện hành. Nếu thiếu dữ liệu, nói rõ giới hạn.\n"
+    "- Tôn trọng riêng tư: không suy đoán hay tiết lộ dữ liệu của người dùng khác."
+)
 
 _REALTIME_MARKERS = (
     "tin tức hôm nay",
