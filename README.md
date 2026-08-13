@@ -36,6 +36,12 @@ kèm mức stop/target tham khảo, và tóm tắt nhóm chat Zalo.
   `gemini-3.6-flash`. Các model cũ (`llama-3.3-70b-versatile`, `gemini-2.5-flash`) đang bị
   nhà cung cấp khai tử dần trong năm 2026 — kiểm tra lại định kỳ nếu thấy provider báo lỗi
   "model decommissioned".
+  - **9Router (tùy chọn, `/ai on`):** user tự bật bằng lệnh `/ai on` để dùng model qua
+    9Router (proxy OpenAI-compatible, `ROUTER9_*` trong `.env.example`) làm provider ĐẦU
+    TIÊN cho chat tự do, thay vì Groq. Vẫn tự động rơi về Groq → OpenRouter → Gemini nếu
+    9Router lỗi/hết hạn mức, đúng cơ chế fallback sẵn có. `/ai off` (mặc định) tắt hẳn,
+    hành vi chat y hệt như chưa có tính năng này. Chỉ ảnh hưởng chat tự do — `/gia`,
+    `/vimo` (grounding) và ảnh→prompt (vision) luôn dùng Google, không đổi.
 - **`/gia`, `/vimo`:** Google Gemini + Google Search grounding — fail closed (nếu không
   xác minh được qua tìm kiếm thật, bot nói rõ chưa tra được, không tự suy đoán).
 - **`/prompt` và gửi ảnh:** văn bản dùng Groq/OpenRouter; ảnh dùng Gemini vision để viết
@@ -142,6 +148,7 @@ Các biến theo tính năng:
 |---|---|
 | `SETTINGS_ENC_KEY` | Bắt buộc khi `ZALO_ENABLED=true`. Sinh bằng `python -c "import secrets;print(secrets.token_urlsafe(32))"`. Dùng để mã hoá session cookie Zalo trong DB. |
 | `GOOGLE_API_KEY` | Cần cho `/gia`, `/vimo`, gửi ảnh (`/prompt` ảnh, ảnh Zalo). Không có thì các tính năng này báo lỗi "chưa cấu hình". |
+| `ROUTER9_API_KEY` | Tùy chọn. Chỉ cần nếu muốn dùng lệnh `/ai on` (9Router làm model mặc định cho chat). Không set thì `/ai on` vẫn không lỗi, chỉ luôn fallback thẳng sang Groq. |
 
 Các biến còn lại (`GROQ_MODEL`, `AI_TIMEOUT_SEC`, `CHAT_HISTORY_TURNS`, `*_MAX_CONCURRENCY`,
 `STOCK_CACHE_TTL_SEC`...) đều có default hợp lý trong `core/config.py`, chỉ cần đổi nếu
@@ -164,7 +171,8 @@ Tóm tắt các nhóm lệnh:
   `/vimo`), không bao giờ dùng knowledge base cho các câu này. Knowledge base (`/rag`,
   xem mục bên dưới) mặc định TẮT với user mới — chỉ được tra khi user tự bật bằng `/rag
   on`, và chỉ áp dụng cho các câu hỏi KHÔNG mang ý định tra cứu/tìm kiếm thời gian thực ở
-  trên.
+  trên. Model 9Router (`/ai`, xem mục Kiến trúc — Chat) mặc định TẮT — bật bằng `/ai on`,
+  tắt bằng `/ai off`, gõ `/ai` suông để xem trạng thái.
 - **Tra cứu có grounding:** `/gia <sản phẩm>`, `/vimo <câu hỏi vĩ mô/tin tức>`.
 - **Dịch Nhật↔Việt:** `/dich [ja>vi|vi>ja] <nội dung>` — dịch chat công việc kỹ thuật giữa
   KIV và phía Nhật, không chỉ định chiều thì tự nhận diện qua chữ Nhật trong câu (có chữ

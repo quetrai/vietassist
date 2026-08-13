@@ -20,6 +20,12 @@ services:
         sync: false
       - key: GOOGLE_API_KEY
         sync: false
+      - key: ROUTER9_API_KEY
+        sync: false
+      - key: ROUTER9_BASE_URL
+        value: "https://api.nangdecor.com/v1"
+      - key: ROUTER9_MODEL
+        value: "notion/GPT-5.6 Luna"
       - key: WEBHOOK_SECRET
         sync: false
       - key: WEBHOOK_BASE_URL
