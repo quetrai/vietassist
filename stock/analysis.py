@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -9,7 +10,7 @@ from datetime import datetime
 from ai import router
 from ai.contracts import TaskType
 from core.config import settings
-from stock import fundamentals, news, price_adjust, validation
+from stock import fundamentals, news, price_adjust, report_format, validation
 from stock.features import calculate
 from stock.market import VN_TZ, fetch, fetch_pair, fetch_realtime_tick, trim_open_session
 from stock.policy import Decision, evaluate
@@ -52,8 +53,12 @@ def _payload(symbol: str, decision: Decision, features: object, date: str) -> di
     payload: dict[str, object] = {
         "symbol": symbol,
         "date": date,
-        "features": vars(features),
-        "decision": vars(decision),
+        # asdict() thay vì vars(): Features/Decision giờ chứa nhiều dataclass lồng nhau
+        # (MACDResult, ADXResult, KeyLevels, TradePlan, Scenario...) — vars() chỉ lấy
+        # field cấp 1 và để nguyên object lồng bên trong, json.dumps() sẽ lỗi khi gặp
+        # object đó. asdict() đệ quy convert toàn bộ cây thành dict/list JSON-safe.
+        "features": dataclasses.asdict(features),
+        "decision": dataclasses.asdict(decision),
     }
     # Khoảng cách % tính sẵn ở Python (không để LLM tự tính) — vì đây là tiền thật của
     # khách, số liệu phải chính xác tuyệt đối, không phụ thuộc LLM làm phép chia đúng/sai.
@@ -69,12 +74,11 @@ def _payload(symbol: str, decision: Decision, features: object, date: str) -> di
     return payload
 
 
-async def _safe_fundamentals_payload(symbol: str) -> dict[str, object] | None:
+async def _safe_fundamentals(symbol: str) -> fundamentals.FundamentalsBundle | None:
     try:
-        bundle = await fundamentals.fetch_fundamentals(symbol)
-        return fundamentals.to_payload(bundle, symbol)
+        return await fundamentals.fetch_fundamentals(symbol)
     except Exception:
-        logger.warning("fundamentals payload lỗi cho %s", symbol, exc_info=True)
+        logger.warning("fundamentals lỗi cho %s", symbol, exc_info=True)
         return None
 
 
@@ -88,9 +92,9 @@ async def _safe_symbol_news(symbol: str) -> str | None:
 
 async def analyze_symbol(symbol: str, *, holding: bool = False, deep: bool = False) -> str:
     symbol = normalize_symbol(symbol)
-    (series, market), fundamentals_payload, recent_news = await asyncio.gather(
+    (series, market), fundamentals_bundle, recent_news = await asyncio.gather(
         fetch_pair(symbol, ttl=settings.stock_cache_ttl_sec),
-        _safe_fundamentals_payload(symbol),
+        _safe_fundamentals(symbol),
         _safe_symbol_news(symbol),
     )
     # Cổng chất lượng dữ liệu MỀM (xem stock/validation.py) — chạy TRƯỚC khi cắt nến
@@ -107,9 +111,13 @@ async def analyze_symbol(symbol: str, *, holding: bool = False, deep: bool = Fal
     # support-resistance không đổi qua lại nhiều lần trong cùng 1 phiên tuỳ giờ hỏi.
     series = trim_open_session(series)
     market = trim_open_session(market)
-    features = calculate(series, market)
+    exchange = fundamentals_bundle.foreign_flow.exchange if (
+        fundamentals_bundle and fundamentals_bundle.foreign_flow
+    ) else None
+    features = calculate(series, market, exchange=exchange)
     decision = evaluate(features, holding=holding)
     payload = _payload(symbol, decision, features, series.dates[-1])
+    fundamentals_payload = fundamentals.to_payload(fundamentals_bundle, symbol) if fundamentals_bundle else None
     if fundamentals_payload:
         payload["fundamentals"] = fundamentals_payload
     if audit.note:
@@ -152,23 +160,62 @@ QUY TẮC CỨNG (bắt buộc tuân thủ tuyệt đối):
   R:R đã có sẵn trong "decision".
 - "decision.confidence" là số 0-1 — diễn giải thành lời (thấp/trung bình/cao), không đọc nguyên số
   thập phân thô.
+- "decision.setup_type" (breakout/pullback/mean_reversion/none), "decision.risk_level"
+  (low/medium/high), "decision.market_regime" (risk_on/neutral/risk_off) do HỆ THỐNG phân loại —
+  dùng lại nguyên văn ý nghĩa, không tự đổi.
+- Nếu "decision.market_regime" là "risk_off", PHẢI nêu rõ bối cảnh VNINDEX đang xấu ảnh hưởng thế
+  nào tới khuyến nghị (dùng "features.market_regime_reason"), kể cả khi bản thân mã đang tốt.
+- Nếu JSON có "decision.trade_plan" (chỉ xuất hiện khi action là BUY): nêu vùng mua ("entry_low" -
+  "entry_high"), tỷ trọng đề xuất ("position_size_pct" — luôn ghi rõ đây là % NAV, không phải %
+  giá), và ghi chú chốt lời/dời stop ("plan_note").
+- Nếu JSON có "decision.scenarios" (3 kịch bản base/bull/bear): tóm tắt ngắn gọn từng kịch bản kèm
+  điều kiện kích hoạt cụ thể (đã có sẵn số trong "trigger"), không tự bịa thêm điều kiện khác.
+- "features.macd"/"features.adx"/"features.atr14"/"features.donchian"/"features.bollinger" có
+  field "available": false khi hệ thống KHÔNG đủ dữ liệu H/L thật để tính (không phải bịa số 0) —
+  trường hợp này KHÔNG được nhắc tới chỉ báo đó như thể đã tính được.
+- "features.key_levels" là support/resistance theo cụm đỉnh/đáy đã được thị trường test nhiều lần
+  (không phải chỉ min/max thô) — nếu có, ưu tiên dùng thay cho "features.support"/"resistance" đơn
+  lẻ khi mô tả vùng giá, và có thể nhắc số lần test ("touches") để tăng thuyết phục.
+- "features.session_limit" cho biết biên độ trần/sàn theo đúng sàn niêm yết (HOSE ±7%/HNX ±10%/
+  UPCOM ±15%) — nếu "at_ceiling" hoặc "at_floor" là true, PHẢI cảnh báo rõ rủi ro mua đuổi trần/kẹp
+  hàng ở sàn.
+- "features.liquidity.is_thin" = true nghĩa là thanh khoản quá mỏng — PHẢI cảnh báo lệnh khó khớp
+  đúng vùng giá đã tính, kể cả khi kỹ thuật có vẻ tốt.
+- Nếu JSON có "fundamentals.foreign_flow", đây là dữ liệu khối ngoại từ nguồn không chính thức, độ
+  tin cậy trung bình — PHẢI nêu kèm ghi chú "chỉ mang tính tham khảo", không dùng làm căn cứ chính
+  để đổi action.
+- Nếu JSON có "fundamentals.upcoming_events", nêu ngắn gọn sự kiện gần nhất (vd ngày GDKHQ/ĐHCĐ) và
+  cảnh báo nếu nó rơi trước ngày có thể ảnh hưởng tới kế hoạch hành động vừa nêu.
+- CHỈ VIẾT BẰNG TIẾNG VIỆT. TUYỆT ĐỐI không chèn từ/câu tiếng Anh (trừ thuật ngữ tài chính chuẩn
+  như SMA, RSI, MACD, ADX, R:R, stop, target), tiếng Trung, tiếng Nhật, tiếng Hàn, tiếng Pháp,
+  tiếng Ý hay bất kỳ ngôn ngữ nào khác lẫn vào giữa câu tiếng Việt.
+- TUYỆT ĐỐI không in lại JSON, không dùng dấu ngoặc nhọn {{ }}, không dùng code block, không dán
+  nguyên văn payload đã được cấp — mọi số liệu phải được diễn giải thành câu văn tiếng Việt bình
+  thường.
 
 === YÊU CẦU OUTPUT ===
 Viết 1 tin nhắn tiếng Việt, giọng Lan Anh thân thiện nhưng số liệu chuẩn xác như chuyên viên phân
 tích thực thụ, có emoji vừa phải, đủ các phần sau (có thể gộp câu cho tự nhiên, không cần ghi lại
 tiêu đề số thứ tự):
 0. Mở đầu nêu giá hiện tại ("features.price") và % thay đổi phiên gần nhất ("features.change_pct").
-1. Kết luận nhanh — action + lý do lõi (từ "decision.reasons") + mức độ tự tin.
-2. Bức tranh kỹ thuật — diễn giải thành câu chuyện giá/volume, KHÔNG liệt kê lại số suông: SMA20 vs
-   SMA50, RSI14, volume_ratio, relative_strength_20d, support/resistance kèm % khoảng cách.
-3. Dòng tiền & bối cảnh — fundamentals (nếu có) đối chiếu đúng ngành, tin tức gần đây (nếu có).
-   Nếu dữ liệu nào ngược chiều với kỹ thuật, phải nói rõ mâu thuẫn thay vì lờ đi.
-4. Kế hoạch hành động — nếu "decision.stop" và "decision.target" khác null: nêu vùng stop/target
-   kèm % khoảng cách và R:R ("decision.risk_reward"). Nếu là null thì nói thẳng hệ thống chưa đủ cơ
-   sở đưa kế hoạch cụ thể, không tự bịa vùng giá.
-5. Rủi ro chính — 2-3 gạch đầu dòng, ưu tiên rủi ro khiến kịch bản chính sai (dựa volatility_pct,
-   thanh khoản, tin xấu, ngành yếu). Nếu có cảnh báo điều chỉnh giá/chất lượng dữ liệu, phải nêu.
-6. Nếu có phần thiếu dữ liệu (vd không có fundamentals/recent_news), gộp vào ĐÚNG MỘT dòng ngắn.
+1. Kết luận nhanh — action + setup_type + lý do lõi (từ "decision.reasons") + mức độ tự tin.
+2. Bối cảnh thị trường chung — "features.market_regime" và lý do ("features.market_regime_reason"),
+   đặc biệt nếu risk_off phải nêu rõ ảnh hưởng tới quyết định.
+3. Bức tranh kỹ thuật — diễn giải thành câu chuyện giá/volume, KHÔNG liệt kê lại số suông: MA
+   alignment (SMA20/SMA50, MA5/10/20), RSI14, MACD (nếu available), ADX (nếu available và trending),
+   volume_ratio/liquidity, key_levels support/resistance kèm % khoảng cách.
+4. Dòng tiền & bối cảnh — fundamentals (định giá đối chiếu đúng ngành, khối ngoại nếu có, sự kiện
+   sắp tới nếu có), tin tức gần đây (nếu có). Nếu dữ liệu nào ngược chiều với kỹ thuật, phải nói rõ
+   mâu thuẫn thay vì lờ đi.
+5. Kế hoạch hành động — nếu "decision.stop" và "decision.target" khác null: nêu vùng stop/target
+   kèm % khoảng cách và R:R ("decision.risk_reward"); nếu có "decision.trade_plan" nêu thêm vùng
+   mua/tỷ trọng/ghi chú chốt lời; nếu có "decision.scenarios" tóm tắt 3 kịch bản. Nếu null thì nói
+   thẳng hệ thống chưa đủ cơ sở đưa kế hoạch cụ thể, không tự bịa vùng giá.
+6. Rủi ro chính — 2-3 gạch đầu dòng, ưu tiên rủi ro khiến kịch bản chính sai ("decision.
+   invalidation_reason", volatility/ATR, thanh khoản mỏng, sát trần/sàn, tin xấu, ngành yếu). Nếu có
+   cảnh báo điều chỉnh giá/chất lượng dữ liệu, phải nêu.
+7. Nếu có phần thiếu dữ liệu (vd không có fundamentals/recent_news/khối ngoại), gộp vào ĐÚNG MỘT
+   dòng ngắn.
 
 Câu kết: ĐÚNG MỘT câu ngắn nhắc đây là thông tin tham khảo, không phải khuyến nghị đầu tư tuyệt
 đối — chỉ xuất hiện MỘT LẦN, ở cuối tin nhắn. KHÔNG dùng markdown code block, không lặp lại nguyên
@@ -189,4 +236,4 @@ văn tên trường JSON, viết tự nhiên."""
             system=system,
             temperature=0.2,
         )
-    return response.text
+    return report_format.clean_analysis_output(response.text)

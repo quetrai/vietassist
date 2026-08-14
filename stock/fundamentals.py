@@ -14,16 +14,16 @@ ngành, port RÚT GỌN từ repo Gemini (`stock/fundamentals.py`). Dùng thư v
 - Gọi vnstock là thao tác ĐỒNG BỘ (blocking) → luôn chạy qua
   `asyncio.to_thread()` với timeout, không bao giờ raise ra ngoài
   `fetch_fundamentals()` — mất fundamentals không được làm hỏng cả `/stock`.
-- Bản gốc (Gemini) còn có thêm khối ngoại, tăng trưởng theo quý và lịch sự
-  kiện (đánh dấu "THỬ NGHIỆM", độ tin cậy chưa xác minh hết) — KHÔNG được port
-  ở đây để giữ phạm vi rõ ràng (chỉ định giá + benchmark ngành). Có thể thêm
-  sau nếu cần.
+- Khối ngoại (`fetch_foreign_flow`) và lịch sự kiện (`fetch_upcoming_events`) lấy qua
+  API nội bộ TCBS (khác VCI ở trên) — CŨNG không chính thức/không tài liệu hoá, cùng rủi
+  ro như trên. Tách hàm riêng, timeout riêng, không bao giờ raise ra ngoài — thiếu 1
+  trong 2 không được làm hỏng phần định giá đã lấy được từ VCI.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from stock import fundamental_profiles, sector
 
@@ -60,6 +60,8 @@ class FundamentalsBundle:
     valuation: Valuation | None = None
     sector_profile: fundamental_profiles.FundamentalProfile | None = None
     sector_benchmark: SectorBenchmark | None = None
+    foreign_flow: "ForeignFlow | None" = None
+    upcoming_events: "list[UpcomingEvent]" = field(default_factory=list)
 
 
 def _to_float(value: object) -> float | None:
@@ -250,12 +252,120 @@ async def fetch_sector_benchmark(
     return SectorBenchmark(profile.benchmark_metric, average, len(values), meta["label"])
 
 
+@dataclass
+class ForeignFlow:
+    ownership_pct: float | None = None       # % cổ phần do NĐT nước ngoài nắm giữ hiện tại
+    net_volume_20s_pct: float | None = None  # % KLGD ròng khối ngoại so với tổng KLGD, gộp ~20 phiên gần nhất
+    exchange: str | None = None              # HOSE/HNX/UPCOM - dùng để tính biên độ trần/sàn (stock/features.py)
+
+
+def _fetch_foreign_flow_sync(symbol: str) -> ForeignFlow | None:
+    """Khối ngoại + sàn niêm yết lấy qua API nội bộ TCBS (khác VCI dùng cho valuation ở
+    trên) — ownership_pct/exchange từ Company.overview() (cột 'foreignPercent'/'exchange',
+    tên rõ ràng, độ tin cậy cao). net_volume_20s_pct từ Trading.price_board() (cột 'nstp'
+    = '%KLGD ròng(CM)') — tên cột KHÔNG ghi rõ "khối ngoại" trong chính thư viện vnstock,
+    suy luận từ ngữ cảnh UI TCBS nên độ tin cậy thấp hơn 2 trường kia; sanity-check biên
+    độ [-100, 100] trước khi trả về, bỏ qua nếu vượt (nhiều khả năng đọc nhầm cột)."""
+    try:
+        from vnstock import Trading
+        from vnstock.explorer.tcbs.company import Company as TcbsCompany
+    except ImportError:
+        return None
+
+    ownership_pct = None
+    exchange = None
+    try:
+        overview = TcbsCompany(symbol).overview()
+        if overview is not None and not overview.empty:
+            if "foreign_percent" in overview.columns:
+                ownership_pct = _to_float(overview.iloc[0]["foreign_percent"])
+                if ownership_pct is not None:
+                    ownership_pct = round(ownership_pct * 100, 2) if ownership_pct <= 1 else round(ownership_pct, 2)
+            if "exchange" in overview.columns:
+                raw_exchange = str(overview.iloc[0]["exchange"] or "").strip().upper()
+                exchange = raw_exchange or None
+    except Exception:
+        logger.warning("vnstock: không lấy được overview (foreign_percent/exchange) cho %s", symbol, exc_info=True)
+
+    net_pct = None
+    try:
+        board = Trading(symbol=symbol, show_log=False).price_board([symbol])
+        if board is not None and not board.empty and "%KLGD ròng (CM)" in board.columns:
+            value = _to_float(board.iloc[0]["%KLGD ròng (CM)"])
+            if value is not None and -100 <= value <= 100:
+                net_pct = round(value, 2)
+    except Exception:
+        logger.warning("vnstock: không lấy được KLGD ròng khối ngoại cho %s", symbol, exc_info=True)
+
+    if ownership_pct is None and net_pct is None and exchange is None:
+        return None
+    return ForeignFlow(ownership_pct=ownership_pct, net_volume_20s_pct=net_pct, exchange=exchange)
+
+
+async def fetch_foreign_flow(symbol: str) -> ForeignFlow | None:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_foreign_flow_sync, symbol), timeout=_FETCH_TIMEOUT_SEC
+        )
+    except Exception:
+        logger.warning("fetch_foreign_flow lỗi cho %s", symbol, exc_info=True)
+        return None
+
+
+@dataclass
+class UpcomingEvent:
+    date: str | None
+    title: str
+
+
+_EVENTS_LOOKAHEAD = 5
+
+
+def _fetch_upcoming_events_sync(symbol: str) -> list[UpcomingEvent]:
+    try:
+        from vnstock.explorer.tcbs.company import Company as TcbsCompany
+    except ImportError:
+        return []
+    try:
+        df = TcbsCompany(symbol).events(page_size=_EVENTS_LOOKAHEAD)
+    except Exception:
+        logger.warning("vnstock: không lấy được lịch sự kiện cho %s", symbol, exc_info=True)
+        return []
+    if df is None or df.empty:
+        return []
+    events: list[UpcomingEvent] = []
+    date_col = next((c for c in df.columns if "date" in str(c).lower()), None)
+    title_col = next((c for c in df.columns if "title" in str(c).lower() or "name" in str(c).lower()), None)
+    if title_col is None:
+        return []
+    for _, row in df.head(_EVENTS_LOOKAHEAD).iterrows():
+        title = str(row.get(title_col) or "").strip()
+        if not title:
+            continue
+        date_value = str(row.get(date_col))[:10] if date_col else None
+        events.append(UpcomingEvent(date=date_value, title=title))
+    return events
+
+
+async def fetch_upcoming_events(symbol: str) -> list[UpcomingEvent]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_upcoming_events_sync, symbol), timeout=_FETCH_TIMEOUT_SEC
+        )
+    except Exception:
+        logger.warning("fetch_upcoming_events lỗi cho %s", symbol, exc_info=True)
+        return []
+
+
 async def fetch_fundamentals(symbol: str) -> FundamentalsBundle:
     """Lấy song song định giá + benchmark ngành. Không bao giờ raise ra ngoài
     — thiếu fundamentals không được làm hỏng cả báo cáo `/stock`."""
     try:
-        valuation, benchmark = await asyncio.gather(
-            fetch_valuation(symbol), fetch_sector_benchmark(symbol)
+        valuation, benchmark, foreign_flow, events = await asyncio.gather(
+            fetch_valuation(symbol),
+            fetch_sector_benchmark(symbol),
+            fetch_foreign_flow(symbol),
+            fetch_upcoming_events(symbol),
         )
     except Exception:
         logger.warning("fetch_fundamentals lỗi cho %s", symbol, exc_info=True)
@@ -264,6 +374,8 @@ async def fetch_fundamentals(symbol: str) -> FundamentalsBundle:
         valuation=valuation,
         sector_profile=fundamental_profiles.get_profile(symbol),
         sector_benchmark=benchmark,
+        foreign_flow=foreign_flow,
+        upcoming_events=events,
     )
 
 
@@ -311,4 +423,23 @@ def to_payload(bundle: FundamentalsBundle, symbol: str) -> dict[str, object] | N
             "sector_label": benchmark.label,
             "note": f"ước lượng nhanh từ {benchmark.sample} mã tiêu biểu cùng ngành, không phải toàn ngành",
         }
+    if bundle.foreign_flow and bundle.foreign_flow.exchange:
+        payload["exchange"] = bundle.foreign_flow.exchange
+    if bundle.foreign_flow and (
+        bundle.foreign_flow.ownership_pct is not None or bundle.foreign_flow.net_volume_20s_pct is not None
+    ):
+        foreign: dict[str, object] = {}
+        if bundle.foreign_flow.ownership_pct is not None:
+            foreign["ownership_pct"] = bundle.foreign_flow.ownership_pct
+        if bundle.foreign_flow.net_volume_20s_pct is not None:
+            foreign["net_volume_pct_of_total"] = bundle.foreign_flow.net_volume_20s_pct
+            foreign["net_volume_note"] = (
+                "dương = khối ngoại mua ròng, âm = bán ròng, tính trên KLGD gần đây - nguồn không "
+                "chính thức, độ tin cậy trung bình, chỉ dùng tham khảo"
+            )
+        payload["foreign_flow"] = foreign
+    if bundle.upcoming_events:
+        payload["upcoming_events"] = [
+            {"date": e.date, "title": e.title} for e in bundle.upcoming_events if e.title
+        ]
     return payload
