@@ -8,5 +8,11 @@ google-genai==2.13.0
 pydantic==2.12.5
 cryptography==45.0.5
 vnstock==3.2.6
+# vnstock 3.2.6 dùng pytz trong nội bộ (vnstock/core/utils/parser.py) nhưng KHÔNG khai báo
+# trong install_requires của chính nó (đã xác minh: pip install vnstock trên venv sạch rồi
+# import vẫn ModuleNotFoundError: No module named 'pytz') - đây là lỗi đóng gói của vnstock,
+# không phải thiếu sót ở đây. Khai báo tường minh để chắc chắn được cài trên mọi môi trường
+# (kể cả khi resolver khác không tự suy ra transitive dependency còn thiếu này).
+pytz==2024.1
 jinja2==3.1.4
 pyyaml==6.0.2
