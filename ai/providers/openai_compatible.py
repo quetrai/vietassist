@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 import httpx
 
 from ai.contracts import AIResponse, ProviderError, ProviderUnavailable
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICompatibleProvider:
@@ -143,6 +146,17 @@ class OpenAICompatibleProvider:
                 else:
                     data = response.json()
                     text = data["choices"][0]["message"]["content"]
+                    # Cảnh báo NGAY khi model bị cắt vì hết max_tokens - trước đây không
+                    # log gì cả, text bị cắt giữa chừng vẫn trả về "thành công" như bình
+                    # thường nên rất khó chẩn đoán (chính là bug đã gặp với /stock).
+                    finish_reason = data.get("choices", [{}])[0].get("finish_reason")
+                    if finish_reason == "length":
+                        logger.warning(
+                            "%s: response bị cắt do hết max_tokens=%s - cân nhắc tăng max_tokens "
+                            "cho tác vụ này",
+                            self.name,
+                            max_tokens,
+                        )
                 if not text:
                     raise ProviderError(f"{self.name} trả kết quả rỗng")
                 return AIResponse(text=text.strip(), provider=self.name, model=self.model, raw=data)

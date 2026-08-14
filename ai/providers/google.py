@@ -104,6 +104,15 @@ class GoogleProvider:
                 )
                 if not response.text:
                     raise ProviderError("google trả kết quả rỗng")
+                # Cùng cảnh báo hết max_tokens như OpenAICompatibleProvider - Gemini báo
+                # qua candidates[0].finish_reason == "MAX_TOKENS".
+                candidates = getattr(response, "candidates", None) or []
+                if candidates and getattr(candidates[0], "finish_reason", None) == "MAX_TOKENS":
+                    logger.warning(
+                        "google: response bị cắt do hết max_tokens=%s - cân nhắc tăng max_tokens "
+                        "cho tác vụ này",
+                        max_tokens,
+                    )
                 return AIResponse(response.text.strip(), "google", self.model, raw=response)
             except ProviderError:
                 raise
