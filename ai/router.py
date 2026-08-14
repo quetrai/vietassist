@@ -79,7 +79,16 @@ class AIRouter:
         providers: list[Any] = []
         if prefer_router9:
             providers.append(getattr(self, "router9", None))
-        providers.extend([self.groq, self.openrouter, getattr(self, "google", None)])
+        if task == TaskType.STOCK_NARRATIVE:
+            # Bao cao /stock la tien that cua khach, payload dai (JSON deterministic +
+            # nhieu quy tac tieng Viet phuc tap). groq_model mac dinh la mot model mo 20B
+            # (xem core/config.py) - thinh thoang lan ngon ngu (chen tu tieng Trung/Phap/
+            # Y...) hoac echo nguyen van JSON khi phai xu ly payload dai kieu nay, kieu
+            # loi hiem gap hon o cac model lon hon tren OpenRouter/Google. Uu tien 2
+            # provider do truoc, Groq van la fallback cuoi thay vi thu dau tien.
+            providers.extend([self.openrouter, getattr(self, "google", None), self.groq])
+        else:
+            providers.extend([self.groq, self.openrouter, getattr(self, "google", None)])
         for provider in providers:
             if provider is None:
                 continue
