@@ -226,14 +226,22 @@ văn tên trường JSON, viết tự nhiên."""
             "\nĐây là báo cáo sâu: phân tích kỹ hơn các kịch bản tăng/giảm, so sánh với vùng giá "
             "gần đây, và nêu rõ điều kiện khiến nhận định đảo chiều."
         )
+        # Bao cao "sau" yeu cau nhieu noi dung hon (them scenario chi tiet) - can max_tokens
+        # cao hon deep_report() mac dinh (3500) de khong bi cat giua chung o cuoi cau.
         response = await router.deep_report(
-            [{"role": "user", "content": content}], system=system, temperature=0.4
+            [{"role": "user", "content": content}], system=system, temperature=0.4, max_tokens=4500
         )
     else:
+        # QUAN TRONG: max_tokens mac dinh cua provider.generate() la 2048 - khong du cho
+        # bao cao 7 phan (kem MACD/ADX/regime/trade_plan/scenarios/khoi ngoai/su kien) da
+        # duoc yeu cau trong system prompt o tren, model se bi CAT GIUA CHUNG o cuoi cau
+        # (dung "hết token" chu khong phai loi gui tin nhan Zalo/Zoom/Telegram - cac kenh
+        # gui deu da chunk dung). Phai truyen rieng max_tokens lon hon o day.
         response = await router.text(
             TaskType.STOCK_NARRATIVE,
             [{"role": "user", "content": content}],
             system=system,
             temperature=0.2,
+            max_tokens=3200,
         )
     return report_format.clean_analysis_output(response.text)
