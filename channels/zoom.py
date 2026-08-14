@@ -123,6 +123,10 @@ async def _access_token() -> str:
         return token
 
 
+class ZoomSendError(RuntimeError):
+    """Mot hoac nhieu doan cua tin nhan da cat khong gui duoc toi Zoom sau khi retry."""
+
+
 _MAX_MESSAGE_CHARS = 4096  # Gioi han cua Zoom Team Chat cho 1 tin nhan (docs Zoom).
 
 # Zoom Team Chat dung phuong ngu Markdown RIENG (giong Slack), khac han GFM ma cac
@@ -164,7 +168,7 @@ def _to_zoom_markdown(text: str) -> str:
     return converted
 
 
-async def _post_message(to_jid: str, text: str, user_jid: str, account_id: str) -> None:
+async def _post_message_once(to_jid: str, text: str, user_jid: str, account_id: str) -> None:
     token = await _access_token()
     body = {
         "robot_jid": settings.zoom_bot_jid,
@@ -193,6 +197,61 @@ async def _post_message(to_jid: str, text: str, user_jid: str, account_id: str) 
     response.raise_for_status()
 
 
+_CHUNK_RETRY_ATTEMPTS = 3
+_CHUNK_RETRY_BACKOFF_SEC = 1.5
+
+
+async def _post_message(to_jid: str, text: str, user_jid: str, account_id: str) -> None:
+    # Neu tin nhan dai bi cat thanh nhieu chunk, mot loi tam thoi (429 rate limit, 5xx,
+    # timeout mang...) o MOT chunk giua chung KHONG duoc phep lam mat cac chunk con lai
+    # phia sau - nhung chunk truoc do da gui toi nguoi dung roi, neu loop dung luon thi
+    # phan cuoi cau tra loi bien mat vinh vien ("mat phan cuoi khi doan dai"). Retry vai
+    # lan truoc khi thuc su bo cuoc voi chunk nay.
+    last_exc: Exception | None = None
+    for attempt in range(1, _CHUNK_RETRY_ATTEMPTS + 1):
+        try:
+            await _post_message_once(to_jid, text, user_jid, account_id)
+            return
+        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            last_exc = exc
+            if attempt < _CHUNK_RETRY_ATTEMPTS:
+                logger.warning(
+                    "Zoom send message retry %s/%s to_jid=%s: %s",
+                    attempt,
+                    _CHUNK_RETRY_ATTEMPTS,
+                    to_jid,
+                    exc,
+                )
+                await asyncio.sleep(_CHUNK_RETRY_BACKOFF_SEC * attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
+def _split_message(text: str, limit: int) -> list[str]:
+    """Cat text dai thanh nhieu doan <= limit ky tu, uu tien cat tai ranh gioi dong
+    trong/xuong dong thay vi cat cung giua tu hoac giua cap dau markdown (*bold*, _ital_)
+    - cat cung giua co the lam hong dinh dang nhung khong lam mat noi dung; van giu cat
+    cung nhu phuong an du phong khi khong tim duoc ranh gioi hop ly."""
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        split_at = window.rfind("\n\n")
+        if split_at < limit // 2:
+            split_at = window.rfind("\n")
+        if split_at < limit // 2:
+            split_at = window.rfind(" ")
+        if split_at < limit // 2:
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 async def send_message(
     to_jid: str, text: str, user_jid: str | None = None, account_id: str | None = None
 ) -> None:
@@ -210,10 +269,26 @@ async def send_message(
     # ##, ** rat xau vi khong duoc parse.
     text = _to_zoom_markdown(text)
     # Zoom Team Chat tu choi (400) neu 1 tin nhan vuot qua 4096 ky tu. Cat nho thanh
-    # nhieu tin thay vi gui nguyen mot khoi dai (vi du cau tra loi AI dai).
-    for i in range(0, len(text), _MAX_MESSAGE_CHARS):
-        await _post_message(
-            to_jid, text[i : i + _MAX_MESSAGE_CHARS], effective_user_jid, effective_account_id
+    # nhieu tin thay vi gui nguyen mot khoi dai (vi du cau tra loi AI dai). Gui TUAN
+    # TU (khong song song) de tin den dung thu tu, nhung KHONG dung han "chunk dau
+    # tien sao thi chunk sau vay" - moi chunk gui doc lap, loi o mot chunk khong huy
+    # cac chunk con lai.
+    chunks = _split_message(text, _MAX_MESSAGE_CHARS)
+    errors: list[str] = []
+    for chunk in chunks:
+        try:
+            await _post_message(to_jid, chunk, effective_user_jid, effective_account_id)
+        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            errors.append(str(exc))
+            logger.error(
+                "Zoom send message: bo qua 1 doan sau khi het luot retry (van gui tiep "
+                "cac doan con lai) to_jid=%s: %s",
+                to_jid,
+                exc,
+            )
+    if errors:
+        raise ZoomSendError(
+            f"Gui {len(errors)}/{len(chunks)} doan tin nhan Zoom that bai: " + "; ".join(errors)
         )
 
 
