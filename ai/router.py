@@ -74,6 +74,7 @@ class AIRouter:
         system: str,
         temperature: float = 0.5,
         prefer_router9: bool = False,
+        max_tokens: int = 2048,
     ) -> AIResponse:
         errors: list[str] = []
         providers: list[Any] = []
@@ -93,7 +94,9 @@ class AIRouter:
             if provider is None:
                 continue
             try:
-                return await provider.generate(messages, system=system, temperature=temperature)
+                return await provider.generate(
+                    messages, system=system, temperature=temperature, max_tokens=max_tokens
+                )
             except ProviderError as exc:
                 errors.append(str(exc))
                 logger.warning("Provider fallback (task=%s): %s", task.value, exc)
@@ -107,13 +110,16 @@ class AIRouter:
         *,
         system: str,
         temperature: float = 0.4,
+        max_tokens: int = 3500,
     ) -> AIResponse:
         errors: list[str] = []
         for provider in (self.openrouter, self.groq, getattr(self, "google", None)):
             if provider is None:
                 continue
             try:
-                return await provider.generate(messages, system=system, temperature=temperature)
+                return await provider.generate(
+                    messages, system=system, temperature=temperature, max_tokens=max_tokens
+                )
             except ProviderError as exc:
                 errors.append(str(exc))
                 logger.warning("Provider fallback (deep): %s", exc)
